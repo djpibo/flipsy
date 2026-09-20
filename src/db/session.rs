@@ -1,4 +1,4 @@
-use crate::models::{ConnectionConfig, PlanNode, QueryResult};
+use crate::models::{ConnectionConfig, PlanNode, QueryResult, TableRef, QueryStructure};
 use crate::db::mock::MockEngine;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
@@ -13,6 +13,8 @@ pub struct DatabaseSession {
     pub db_version: String,
     pub last_query_result: Option<QueryResult>,
     pub last_plan: Option<Vec<PlanNode>>,
+    pub last_sql_id: Option<String>,
+    pub last_plan_hash: Option<u64>,
 }
 
 impl DatabaseSession {
@@ -24,6 +26,8 @@ impl DatabaseSession {
             db_version: String::new(),
             last_query_result: None,
             last_plan: None,
+            last_sql_id: None,
+            last_plan_hash: None,
         }
     }
 
@@ -96,6 +100,8 @@ impl DatabaseSession {
         self.db_version.clear();
         self.last_query_result = None;
         self.last_plan = None;
+        self.last_sql_id = None;
+        self.last_plan_hash = None;
     }
 
     fn run_sqlplus_command(conn_str: &str, script: &str) -> Result<String, String> {
@@ -149,9 +155,11 @@ impl DatabaseSession {
                 clean_sql
             );
             if let Ok(plan_output) = Self::run_sqlplus_command(&conn_str, &plan_script) {
-                let parsed_plan = Self::parse_xplan_output(&plan_output);
+                let (parsed_plan, hash, sql_id) = Self::parse_xplan_with_meta(&plan_output);
                 if !parsed_plan.is_empty() {
                     self.last_plan = Some(parsed_plan);
+                    self.last_plan_hash = hash;
+                    self.last_sql_id = sql_id.or(Some("ora26ai_live".to_string()));
                     return;
                 }
             }
@@ -159,6 +167,8 @@ impl DatabaseSession {
 
         let (_, mock_plan) = MockEngine::execute(sql);
         self.last_plan = Some(mock_plan);
+        self.last_plan_hash = Some(272002086);
+        self.last_sql_id = Some("mock_ora26ai".to_string());
     }
 
     pub fn execute(&mut self, sql: &str) -> QueryResult {
@@ -186,16 +196,22 @@ impl DatabaseSession {
                         clean_sql
                     );
                     if let Ok(plan_output) = Self::run_sqlplus_command(&conn_str, &plan_script) {
-                        let parsed_plan = Self::parse_xplan_output(&plan_output);
+                        let (parsed_plan, hash, sql_id) = Self::parse_xplan_with_meta(&plan_output);
                         if !parsed_plan.is_empty() {
                             self.last_plan = Some(parsed_plan);
+                            self.last_plan_hash = hash;
+                            self.last_sql_id = sql_id.or(Some("ora26ai_live".to_string()));
                         } else {
                             let (_, mock_plan) = MockEngine::execute(sql);
                             self.last_plan = Some(mock_plan);
+                            self.last_plan_hash = Some(272002086);
+                            self.last_sql_id = Some("mock_ora26ai".to_string());
                         }
                     } else {
                         let (_, mock_plan) = MockEngine::execute(sql);
                         self.last_plan = Some(mock_plan);
+                        self.last_plan_hash = Some(272002086);
+                        self.last_sql_id = Some("mock_ora26ai".to_string());
                     }
 
                     let row_count = rows.len();
@@ -237,6 +253,8 @@ impl DatabaseSession {
         let (result, plan) = MockEngine::execute(sql);
         self.last_query_result = Some(result.clone());
         self.last_plan = Some(plan);
+        self.last_plan_hash = Some(272002086);
+        self.last_sql_id = Some("mock_ora26ai".to_string());
         result
     }
 
@@ -491,7 +509,34 @@ impl DatabaseSession {
             }
         }
     }
+
+    pub fn parse_xplan_with_meta(xplan: &str) -> (Vec<PlanNode>, Option<u64>, Option<String>) {
+        let nodes = Self::parse_xplan_output(xplan);
+        let mut plan_hash = None;
+        let mut sql_id = None;
+
+        for line in xplan.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("Plan hash value:") {
+                let parts: Vec<&str> = trimmed.split(':').collect();
+                if parts.len() >= 2 {
+                    if let Ok(val) = parts[1].trim().parse::<u64>() {
+                        plan_hash = Some(val);
+                    }
+                }
+            } else if trimmed.starts_with("SQL_ID") || trimmed.contains("sql_id") {
+                if let Ok(re) = regex::Regex::new(r"(?i)sql_id\s*[:=]?\s*([a-z0-9]+)") {
+                    if let Some(cap) = re.captures(trimmed) {
+                        sql_id = cap.get(1).map(|m| m.as_str().to_string());
+                    }
+                }
+            }
+        }
+
+        (nodes, plan_hash, sql_id)
+    }
 }
+
 
 /// Pure Rust SQL Line Formatter & Pretty-Printer (0.1ms deterministic formatting)
 pub fn format_sql(sql: &str) -> String {
@@ -665,4 +710,72 @@ pub fn generate_bind_extraction_query(sql: &str) -> Option<String> {
         "SELECT DISTINCT\n       {}\n  FROM {}\n{}",
         sel_cols, from_clause, where_filter
     ))
+}
+
+/// Analyzes query skeleton, table structure, joins, and WHERE filter predicates
+pub fn analyze_query_structure(sql: &str) -> QueryStructure {
+    let mut ctes = Vec::new();
+    if let Ok(re_cte) = regex::Regex::new(r"(?i)\b([a-zA-Z0-9_]+)\s+AS\s*\(") {
+        for cap in re_cte.captures_iter(sql) {
+            if let Some(m) = cap.get(1) {
+                let name = m.as_str().to_string();
+                let upper = name.to_uppercase();
+                if upper != "SELECT" && upper != "FROM" && upper != "WHERE" {
+                    ctes.push(name);
+                }
+            }
+        }
+    }
+
+    let mut tables = Vec::new();
+    let keywords = ["WHERE", "GROUP", "ORDER", "HAVING", "JOIN", "LEFT", "RIGHT", "INNER", "ON", "AS", "SELECT", "FROM", "SET"];
+    let pat = r"(?i)(FROM|JOIN|LEFT\s+JOIN|RIGHT\s+JOIN|INNER\s+JOIN|FULL\s+OUTER\s+JOIN)\s+([a-zA-Z0-9_.]+)(?:\s+(?:AS\s+)?([a-zA-Z0-9_]+))?(?:\s+ON\s+([^,\n;]+?)(?=\s+(?:JOIN|LEFT|RIGHT|INNER|WHERE|GROUP|ORDER|HAVING|;|$)))?";
+    if let Ok(re_tbl) = regex::Regex::new(pat) {
+        for cap in re_tbl.captures_iter(sql) {
+            let jtype = cap.get(1).map(|m| m.as_str().to_uppercase().split_whitespace().collect::<Vec<&str>>().join(" ")).unwrap_or_else(|| "FROM".to_string());
+            let tbl = cap.get(2).map(|m| m.as_str().to_string()).unwrap_or_default();
+            if tbl.is_empty() || keywords.contains(&tbl.to_uppercase().as_str()) {
+                continue;
+            }
+            let alias = cap.get(3).and_then(|m| {
+                let a = m.as_str().to_string();
+                if keywords.contains(&a.to_uppercase().as_str()) {
+                    None
+                } else {
+                    Some(a)
+                }
+            });
+            let cond = cap.get(4).map(|m| m.as_str().trim().to_string()).filter(|s| !s.is_empty());
+
+            tables.push(TableRef {
+                name: tbl,
+                alias,
+                join_type: jtype,
+                join_condition: cond,
+            });
+        }
+    }
+
+    let mut filters = Vec::new();
+    if let Ok(re_where) = regex::Regex::new(r"(?i)\bWHERE\b(.*?)(?=\bGROUP\b|\bORDER\b|\bHAVING\b|;|$)") {
+        if let Some(cap) = re_where.captures(sql) {
+            if let Some(m) = cap.get(1) {
+                let raw_where = m.as_str();
+                if let Ok(re_split) = regex::Regex::new(r"(?i)\b(?:AND|OR)\b") {
+                    for part in re_split.split(raw_where) {
+                        let c = part.trim();
+                        if !c.is_empty() {
+                            filters.push(c.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    QueryStructure {
+        ctes,
+        tables,
+        filters,
+    }
 }

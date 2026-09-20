@@ -92,7 +92,23 @@ pub struct QueryResult {
     pub message: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableRef {
+    pub name: String,
+    pub alias: Option<String>,
+    pub join_type: String,
+    pub join_condition: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct QueryStructure {
+    pub ctes: Vec<String>,
+    pub tables: Vec<TableRef>,
+    pub filters: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct SampleQuery {
     pub title: String,
     #[allow(dead_code)]

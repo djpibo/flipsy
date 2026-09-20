@@ -1,7 +1,6 @@
 use eframe::egui::{self, Color32, RichText, Rounding, Stroke, Vec2};
 use crate::db::session::DatabaseSession;
-use crate::models::SampleQuery;
-use crate::ui::editor::EditorView;
+use crate::ui::editor::{EditorView, SidebarMode};
 use crate::ui::grid::GridView;
 use crate::ui::plan_tree::PlanTreeView;
 use crate::ui::server_list::ServerListView;
@@ -12,7 +11,6 @@ pub enum AppState {
         session: DatabaseSession,
         editor: EditorView,
         active_bottom_tab: BottomTab,
-        sample_queries: Vec<SampleQuery>,
     },
 }
 
@@ -96,53 +94,6 @@ impl eframe::App for FlipsyApp {
                         // Expand window to full workspace (1280 x 820)
                         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(1280.0, 820.0)));
 
-                        let sample_queries = vec![
-                            SampleQuery {
-                                title: "1. v$version (26ai 버전)".to_string(),
-                                description: "Oracle 26ai Free 버전 실시간 조회".to_string(),
-                                sql: "SELECT banner FROM v$version;".to_string(),
-                            },
-                            SampleQuery {
-                                title: "2. 세션 정보 (USERENV / PDB)".to_string(),
-                                description: "현재 세션 사용자, PDB 컨테이너, 서버 시각 조회".to_string(),
-                                sql: "SELECT sys_context('USERENV', 'SESSION_USER') AS USERNAME,\n       sys_context('USERENV', 'CON_NAME') AS PDB_NAME,\n       TO_CHAR(SYSDATE, 'YYYY-MM-DD HH24:MI:SS') AS SERVER_TIME\n  FROM dual;".to_string(),
-                            },
-                            SampleQuery {
-                                title: "3. 사원 목록 (EMP)".to_string(),
-                                description: "SCOTT 스키마 EMP 테이블 실시간 조회".to_string(),
-                                sql: "SELECT empno, ename, job, mgr, sal, deptno\n  FROM emp\n ORDER BY empno;".to_string(),
-                            },
-                            SampleQuery {
-                                title: "4. 부서 목록 (DEPT)".to_string(),
-                                description: "DEPT 테이블 실시간 조회".to_string(),
-                                sql: "SELECT deptno, dname, loc\n  FROM dept\n ORDER BY deptno;".to_string(),
-                            },
-                            SampleQuery {
-                                title: "5. 튜닝 분석 (Starts 15만 병목)".to_string(),
-                                description: "TB_CENTER_INVENTORY 150K Starts 루프 병목 분석".to_string(),
-                                sql: r#"SELECT /*+ GATHER_PLAN_STATISTICS */
-       I.CENTER_CD,
-       I.ITEM_CD,
-       I.ALLOCATED_QTY,
-       M.ORDER_DATE,
-       M.MOVE_STATUS
-  FROM TB_CENTER_INVENTORY I
-  JOIN TB_INVENTORY_MOVE_ORDER M
-    ON I.ITEM_CD = M.ITEM_CD
- WHERE I.CENTER_CD = 'HUB_01'
-   AND M.MOVE_STATUS = 'READY';"#.to_string(),
-                            },
-                            SampleQuery {
-                                title: "6. 바인드 & XPlan 결합 분석".to_string(),
-                                description: "EMP+DEPT 바인드 변수(:B_SAL, :B_LOC) 추출 및 XPlan Outline/Predicate 분석".to_string(),
-                                sql: r#"SELECT e.empno, e.ename, e.sal, d.dname, d.loc
-  FROM emp e
-  JOIN dept d ON e.deptno = d.deptno
- WHERE e.sal > :B_SAL
-   AND d.loc = :B_LOC;"#.to_string(),
-                            },
-                        ];
-
                         let mut editor = EditorView::new();
                         editor.sql = "SELECT banner FROM v$version;".to_string();
 
@@ -150,8 +101,7 @@ impl eframe::App for FlipsyApp {
                             session,
                             editor,
                             active_bottom_tab: BottomTab::Grid,
-                            sample_queries,
-                        };
+                            };
                     }
                 }
             }
@@ -159,7 +109,6 @@ impl eframe::App for FlipsyApp {
                 session,
                 editor,
                 active_bottom_tab,
-                sample_queries,
             } => {
                 let mut return_to_servers = false;
                 let mut run_requested = false;
@@ -228,25 +177,9 @@ impl eframe::App for FlipsyApp {
                                     });
                                 });
 
-                            ui.add_space(14.0);
-
-                            // Sample Queries
-                            ui.label(RichText::new("예제 쿼리:").size(11.0).color(Color32::from_rgb(113, 113, 122)));
-                            for q in sample_queries.iter() {
-                                let q_btn = egui::Button::new(
-                                    RichText::new(&q.title).size(11.0).color(Color32::from_rgb(24, 24, 27)),
-                                )
-                                .fill(Color32::from_rgb(244, 244, 245))
-                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(228, 228, 231)))
-                                .rounding(Rounding::same(4.0));
-
-                                if ui.add(q_btn).clicked() {
-                                    editor.sql = q.sql.clone();
-                                }
-                            }
-
-                            // Right Action Buttons
+                            // Right Action Buttons: Line-up, Figure, Bind, Run
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                // 1. Run (Rightmost)
                                 let run_btn = egui::Button::new(
                                     RichText::new("▶ Run (Ctrl+Enter)")
                                         .size(12.0)
@@ -255,7 +188,7 @@ impl eframe::App for FlipsyApp {
                                 )
                                 .fill(Color32::from_rgb(24, 24, 27))
                                 .rounding(Rounding::same(4.0))
-                                .min_size(Vec2::new(140.0, 28.0));
+                                .min_size(Vec2::new(130.0, 28.0));
 
                                 if ui.add(run_btn).clicked() {
                                     run_requested = true;
@@ -263,18 +196,57 @@ impl eframe::App for FlipsyApp {
 
                                 ui.add_space(6.0);
 
-                                let explain_btn = egui::Button::new(
-                                    RichText::new("⚡ Explain (F10)")
-                                        .size(12.0)
+                                // 2. Bind
+                                let is_bind = editor.active_sidebar == SidebarMode::Bind;
+                                let bind_btn = egui::Button::new(
+                                    RichText::new("Bind (바인드)")
+                                        .size(11.5)
+                                        .strong()
+                                        .color(if is_bind { Color32::WHITE } else { Color32::from_rgb(2, 132, 199) }),
+                                )
+                                .fill(if is_bind { Color32::from_rgb(2, 132, 199) } else { Color32::from_rgb(240, 249, 255) })
+                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(186, 230, 253)))
+                                .rounding(Rounding::same(4.0))
+                                .min_size(Vec2::new(95.0, 28.0));
+
+                                if ui.add(bind_btn).clicked() {
+                                    editor.toggle_bind();
+                                }
+
+                                ui.add_space(6.0);
+
+                                // 3. Figure
+                                let is_fig = editor.active_sidebar == SidebarMode::Figure;
+                                let fig_btn = egui::Button::new(
+                                    RichText::new("Figure (구조)")
+                                        .size(11.5)
+                                        .strong()
+                                        .color(if is_fig { Color32::WHITE } else { Color32::from_rgb(126, 34, 206) }),
+                                )
+                                .fill(if is_fig { Color32::from_rgb(147, 51, 234) } else { Color32::from_rgb(250, 245, 255) })
+                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(233, 213, 255)))
+                                .rounding(Rounding::same(4.0))
+                                .min_size(Vec2::new(95.0, 28.0));
+
+                                if ui.add(fig_btn).clicked() {
+                                    editor.toggle_figure();
+                                }
+
+                                ui.add_space(6.0);
+
+                                // 4. Line-up (Leftmost)
+                                let fmt_btn = egui::Button::new(
+                                    RichText::new("Line-up (F8)")
+                                        .size(11.5)
                                         .color(Color32::from_rgb(24, 24, 27)),
                                 )
-                                .fill(Color32::WHITE)
-                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(24, 24, 27)))
+                                .fill(Color32::from_rgb(244, 244, 245))
+                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(228, 228, 231)))
                                 .rounding(Rounding::same(4.0))
-                                .min_size(Vec2::new(120.0, 28.0));
+                                .min_size(Vec2::new(95.0, 28.0));
 
-                                if ui.add(explain_btn).clicked() {
-                                    explain_requested = true;
+                                if ui.add(fmt_btn).clicked() {
+                                    editor.format_lines();
                                 }
                             });
                         });
@@ -301,7 +273,7 @@ impl eframe::App for FlipsyApp {
                         // Tabs
                         ui.horizontal(|ui| {
                             let grid_label = format!(
-                                "결과 그리드 {}",
+                                "Result Grid {}",
                                 session.last_query_result.as_ref().map(|r| format!("({})", r.row_count)).unwrap_or_default()
                             );
 
@@ -335,6 +307,9 @@ impl eframe::App for FlipsyApp {
 
                             if ui.add(plan_btn).clicked() {
                                 *active_bottom_tab = BottomTab::PlanTree;
+                                if session.last_plan.is_none() {
+                                    session.explain(&editor.sql);
+                                }
                             }
                         });
 
@@ -345,7 +320,7 @@ impl eframe::App for FlipsyApp {
                                 GridView::show(ui, session.last_query_result.as_ref());
                             }
                             BottomTab::PlanTree => {
-                                PlanTreeView::show(ui, session.last_plan.as_ref());
+                                PlanTreeView::show(ui, session.last_plan.as_ref(), session.last_sql_id.as_deref(), session.last_plan_hash);
                             }
                         }
                     });

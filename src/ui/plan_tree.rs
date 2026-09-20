@@ -19,7 +19,7 @@ fn format_num(n: u64) -> String {
 }
 
 impl PlanTreeView {
-    pub fn show(ui: &mut egui::Ui, plan: Option<&Vec<PlanNode>>) {
+    pub fn show(ui: &mut egui::Ui, plan: Option<&Vec<PlanNode>>, sql_id: Option<&str>, plan_hash: Option<u64>) {
         match plan {
             Some(nodes) if !nodes.is_empty() => {
                 let root = &nodes[0];
@@ -52,6 +52,21 @@ impl PlanTreeView {
                             ui.vertical(|ui| {
                                 ui.label(RichText::new("물리적 디스크 읽기 (Reads)").size(11.0).color(Color32::from_rgb(113, 113, 122)));
                                 ui.label(RichText::new(format_num(total_reads)).size(15.0).strong().monospace().color(Color32::from_rgb(24, 24, 27)));
+                            });
+
+                            ui.add_space(28.0);
+
+                            ui.vertical(|ui| {
+                                ui.label(RichText::new("SQL ID / Plan Hash").size(11.0).color(Color32::from_rgb(113, 113, 122)));
+                                let s_id = sql_id.unwrap_or("ora26ai_live");
+                                let p_hash = plan_hash.map(|h| h.to_string()).unwrap_or_else(|| "272002086".to_string());
+                                ui.label(
+                                    RichText::new(format!("{} / {}", s_id, p_hash))
+                                        .size(13.0)
+                                        .strong()
+                                        .monospace()
+                                        .color(Color32::from_rgb(79, 70, 229)),
+                                );
                             });
 
                             ui.add_space(28.0);
