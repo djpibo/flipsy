@@ -538,126 +538,351 @@ impl DatabaseSession {
 }
 
 
-/// Pure Rust SQL Line Formatter & Pretty-Printer (Idempotent 0.05ms deterministic formatting)
+/// Pure Rust SQL Line Formatter & Tokenizer-based Pretty-Printer
+/// Guarantees:
+/// 1. Idempotent (running N times produces identical output)
+/// 2. NEVER corrupts identifiers (e.g. O.ORD_ID, ORDER_SUMMARY, B.ON_HAND_QTY, JOIN_DATE stay 100% intact)
+/// 3. Preserves comments (-- ... and /* ... */) and string literals ('...')
+/// 4. Beautifully indents and aligns major clauses (SELECT, FROM, WHERE, AND, OR, JOIN, ON, GROUP BY, ORDER BY, HAVING)
+/// 5. Neatly wraps and aligns top-level SELECT columns
 pub fn format_sql(sql: &str) -> String {
     let trimmed = sql.trim();
     if trimmed.is_empty() {
         return String::new();
     }
 
-    // 1. Normalize all whitespace outside single quotes
-    let chars: Vec<char> = trimmed.chars().collect();
-    let mut in_str = false;
-    let mut norm = Vec::new();
+    #[derive(Debug, Clone, PartialEq)]
+    enum TokenType {
+        Word,
+        StringLit,
+        Comment,
+        Bind,
+        Dot,
+        Comma,
+        OpenParen,
+        CloseParen,
+        Semicolon,
+        Op,
+    }
+
+    struct Token {
+        ttype: TokenType,
+        val: String,
+    }
+
+    // 1. Lexical Analysis / Tokenizer
+    let chars: Vec<char> = sql.chars().collect();
+    let n = chars.len();
+    let mut tokens = Vec::new();
     let mut i = 0;
-    while i < chars.len() {
+
+    while i < n {
         let c = chars[i];
-        if c == '\'' {
-            in_str = !in_str;
-            norm.push(c);
-        } else if !in_str && (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
-            if !norm.is_empty() && norm[norm.len() - 1] != ' ' {
-                norm.push(' ');
-            }
-        } else {
-            norm.push(c);
-        }
-        i += 1;
-    }
 
-    let clean_sql: String = norm.into_iter().collect();
-
-    // 2. Clause replacements with regex
-    let clauses = [
-        (r"(?i)\bSELECT\s*", "\nSELECT\n"),
-        (r"(?i)\bFROM\s*", "\n  FROM "),
-        (r"(?i)\bWHERE\s*", "\n WHERE "),
-        (r"(?i)\bAND\s*", "\n   AND "),
-        (r"(?i)\bOR\s*", "\n    OR "),
-        (r"(?i)\bLEFT\s+JOIN\s*", "\n  LEFT JOIN "),
-        (r"(?i)\bRIGHT\s+JOIN\s*", "\n  RIGHT JOIN "),
-        (r"(?i)\bINNER\s+JOIN\s*", "\n  INNER JOIN "),
-        (r"(?i)\bJOIN\s*", "\n  JOIN "),
-        (r"(?i)\bON\s*", "\n    ON "),
-        (r"(?i)\bORDER\s+BY\s*", "\n ORDER BY "),
-        (r"(?i)\bGROUP\s+BY\s*", "\n GROUP BY "),
-        (r"(?i)\bHAVING\s*", "\n HAVING "),
-    ];
-
-    let mut formatted = clean_sql;
-    for (pat, repl) in clauses {
-        if let Ok(re) = regex::Regex::new(pat) {
-            formatted = re.replace_all(&formatted, repl).to_string();
-        }
-    }
-
-    // 3. Line-by-line clean up & column formatting
-    let re_spaces = regex::Regex::new(r"\s+").unwrap();
-    let mut result_lines = Vec::new();
-    let raw_lines: Vec<&str> = formatted.split('\n').collect();
-    let mut line_idx = 0;
-
-    while line_idx < raw_lines.len() {
-        let line = raw_lines[line_idx].trim();
-        line_idx += 1;
-        if line.is_empty() {
+        if c.is_whitespace() {
+            i += 1;
             continue;
         }
 
-        // collapse internal multiple spaces
-        let single_spaced = re_spaces.replace_all(line, " ").to_string();
-        let upper = single_spaced.to_uppercase();
-
-        if upper == "SELECT" {
-            if line_idx < raw_lines.len() {
-                let cols_line = raw_lines[line_idx].trim();
-                line_idx += 1;
-                let cols: Vec<&str> = cols_line.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-                if cols.is_empty() {
-                    result_lines.push("SELECT".to_string());
-                } else {
-                    for (idx, col) in cols.iter().enumerate() {
-                        let comma = if idx < cols.len() - 1 { "," } else { "" };
-                        if idx == 0 {
-                            result_lines.push(format!("SELECT {}{}", col, comma));
-                        } else {
-                            result_lines.push(format!("       {}{}", col, comma));
-                        }
-                    }
-                }
-            } else {
-                result_lines.push("SELECT".to_string());
+        // Line comment: --
+        if c == '-' && i + 1 < n && chars[i + 1] == '-' {
+            let mut j = i + 2;
+            while j < n && chars[j] != '\n' {
+                j += 1;
             }
-        } else if upper.starts_with("FROM ") {
-            result_lines.push(format!("  FROM {}", single_spaced[5..].trim()));
-        } else if upper.starts_with("WHERE ") {
-            result_lines.push(format!(" WHERE {}", single_spaced[6..].trim()));
-        } else if upper.starts_with("AND ") {
-            result_lines.push(format!("   AND {}", single_spaced[4..].trim()));
-        } else if upper.starts_with("OR ") {
-            result_lines.push(format!("    OR {}", single_spaced[3..].trim()));
-        } else if upper.starts_with("LEFT JOIN ") {
-            result_lines.push(format!("  LEFT JOIN {}", single_spaced[10..].trim()));
-        } else if upper.starts_with("RIGHT JOIN ") {
-            result_lines.push(format!("  RIGHT JOIN {}", single_spaced[11..].trim()));
-        } else if upper.starts_with("INNER JOIN ") {
-            result_lines.push(format!("  INNER JOIN {}", single_spaced[11..].trim()));
-        } else if upper.starts_with("JOIN ") {
-            result_lines.push(format!("  JOIN {}", single_spaced[5..].trim()));
-        } else if upper.starts_with("ON ") {
-            result_lines.push(format!("    ON {}", single_spaced[3..].trim()));
-        } else if upper.starts_with("ORDER BY ") {
-            result_lines.push(format!(" ORDER BY {}", single_spaced[9..].trim()));
-        } else if upper.starts_with("GROUP BY ") {
-            result_lines.push(format!(" GROUP BY {}", single_spaced[9..].trim()));
-        } else if upper.starts_with("HAVING ") {
-            result_lines.push(format!(" HAVING {}", single_spaced[7..].trim()));
-        } else {
-            result_lines.push(single_spaced);
+            tokens.push(Token {
+                ttype: TokenType::Comment,
+                val: chars[i..j].iter().collect::<String>().trim().to_string(),
+            });
+            i = j;
+            continue;
         }
+
+        // Block comment: /* ... */
+        if c == '/' && i + 1 < n && chars[i + 1] == '*' {
+            let mut j = i + 2;
+            while j + 1 < n && !(chars[j] == '*' && chars[j + 1] == '/') {
+                j += 1;
+            }
+            j = (j + 2).min(n);
+            tokens.push(Token {
+                ttype: TokenType::Comment,
+                val: chars[i..j].iter().collect::<String>().trim().to_string(),
+            });
+            i = j;
+            continue;
+        }
+
+        // String literal: '...'
+        if c == '\'' {
+            let mut j = i + 1;
+            while j < n {
+                if chars[j] == '\'' {
+                    if j + 1 < n && chars[j + 1] == '\'' {
+                        j += 2;
+                    } else {
+                        j += 1;
+                        break;
+                    }
+                } else {
+                    j += 1;
+                }
+            }
+            tokens.push(Token {
+                ttype: TokenType::StringLit,
+                val: chars[i..j].iter().collect(),
+            });
+            i = j;
+            continue;
+        }
+
+        // Bind variable: :var_name or :1
+        if c == ':' && i + 1 < n && (chars[i + 1].is_alphanumeric() || chars[i + 1] == '_') {
+            let mut j = i + 1;
+            while j < n && (chars[j].is_alphanumeric() || chars[j] == '_') {
+                j += 1;
+            }
+            tokens.push(Token {
+                ttype: TokenType::Bind,
+                val: chars[i..j].iter().collect(),
+            });
+            i = j;
+            continue;
+        }
+
+        // Word (Identifier or Keyword)
+        if c.is_alphabetic() || c == '_' || c == '$' || c == '#' {
+            let mut j = i + 1;
+            while j < n && (chars[j].is_alphanumeric() || chars[j] == '_' || chars[j] == '$' || chars[j] == '#') {
+                j += 1;
+            }
+            tokens.push(Token {
+                ttype: TokenType::Word,
+                val: chars[i..j].iter().collect(),
+            });
+            i = j;
+            continue;
+        }
+
+        // Parentheses and punctuation
+        if c == '(' {
+            tokens.push(Token { ttype: TokenType::OpenParen, val: "(".to_string() });
+            i += 1;
+            continue;
+        }
+        if c == ')' {
+            tokens.push(Token { ttype: TokenType::CloseParen, val: ")".to_string() });
+            i += 1;
+            continue;
+        }
+        if c == ',' {
+            tokens.push(Token { ttype: TokenType::Comma, val: ",".to_string() });
+            i += 1;
+            continue;
+        }
+        if c == ';' {
+            tokens.push(Token { ttype: TokenType::Semicolon, val: ";".to_string() });
+            i += 1;
+            continue;
+        }
+        if c == '.' {
+            tokens.push(Token { ttype: TokenType::Dot, val: ".".to_string() });
+            i += 1;
+            continue;
+        }
+
+        // Operators: >=, <=, !=, <>, ||, or single-char
+        if c == '>' || c == '<' || c == '!' || c == '=' || c == '|' {
+            let mut j = i + 1;
+            while j < n && (chars[j] == '>' || chars[j] == '<' || chars[j] == '=' || chars[j] == '|' || chars[j] == '+') {
+                j += 1;
+            }
+            tokens.push(Token {
+                ttype: TokenType::Op,
+                val: chars[i..j].iter().collect(),
+            });
+            i = j;
+            continue;
+        }
+
+        // Single-character operator (+, -, *, /)
+        tokens.push(Token {
+            ttype: TokenType::Op,
+            val: c.to_string(),
+        });
+        i += 1;
     }
 
-    result_lines.join("\n")
+    // 2. Syntax-aware line reconstruction
+    let mut result_lines = Vec::new();
+    let mut curr_line = Vec::new();
+    let mut paren_depth: usize = 0;
+    let mut subquery_depth: usize = 0;
+    let mut in_select_clause = false;
+    let mut prev_ttype: Option<TokenType> = None;
+    let mut prev_word: String = String::new();
+
+    let mut idx = 0;
+    while idx < tokens.len() {
+        let ttype = tokens[idx].ttype.clone();
+        let tval = &tokens[idx].val;
+        let upper = if ttype == TokenType::Word {
+            tval.to_uppercase()
+        } else {
+            tval.clone()
+        };
+
+        // Detect compound keywords: ORDER BY, GROUP BY, LEFT JOIN, RIGHT JOIN, INNER JOIN
+        let mut compound: Option<&str> = None;
+        if ttype == TokenType::Word && idx + 1 < tokens.len() && tokens[idx + 1].ttype == TokenType::Word {
+            let next_upper = tokens[idx + 1].val.to_uppercase();
+            if upper == "ORDER" && next_upper == "BY" {
+                compound = Some("ORDER BY");
+            } else if upper == "GROUP" && next_upper == "BY" {
+                compound = Some("GROUP BY");
+            } else if upper == "LEFT" && next_upper == "JOIN" {
+                compound = Some("LEFT JOIN");
+            } else if upper == "RIGHT" && next_upper == "JOIN" {
+                compound = Some("RIGHT JOIN");
+            } else if upper == "INNER" && next_upper == "JOIN" {
+                compound = Some("INNER JOIN");
+            }
+        }
+
+        let clause_candidate = compound.unwrap_or(&upper);
+
+        // Only treat as clause if NOT preceded by '.' (e.g. O.ORD_ID, B.ON_HAND_QTY are NOT clauses!)
+        let is_clause = prev_ttype != Some(TokenType::Dot) && ttype == TokenType::Word && matches!(
+            clause_candidate,
+            "SELECT" | "FROM" | "WHERE" | "AND" | "OR" | "HAVING"
+                | "ORDER BY" | "GROUP BY" | "JOIN" | "LEFT JOIN"
+                | "RIGHT JOIN" | "INNER JOIN" | "ON" | "WITH"
+        );
+
+        if is_clause {
+            // If inside function parentheses or inline condition (like (:b_cust_grade IS NULL OR ...)), don't break line
+            if paren_depth > subquery_depth && matches!(clause_candidate, "AND" | "OR" | "ORDER BY") {
+                // Keep inline
+            } else {
+                if !curr_line.is_empty() {
+                    result_lines.push(curr_line.join(""));
+                    curr_line.clear();
+                }
+
+                in_select_clause = clause_candidate == "SELECT";
+
+                let indent = "    ".repeat(subquery_depth);
+                let prefix = match clause_candidate {
+                    "WITH" => "",
+                    "SELECT" => "",
+                    "FROM" => "  ",
+                    "WHERE" => " ",
+                    "AND" => "   ",
+                    "OR" => "    ",
+                    "JOIN" | "LEFT JOIN" | "RIGHT JOIN" | "INNER JOIN" => "  ",
+                    "ON" => "    ",
+                    "GROUP BY" | "ORDER BY" => " ",
+                    "HAVING" => "",
+                    _ => "",
+                };
+
+                curr_line.push(format!("{}{}{} ", indent, prefix, clause_candidate));
+                let advance = if compound.is_some() { 2 } else { 1 };
+                idx += advance;
+                prev_ttype = Some(TokenType::Word);
+                prev_word = clause_candidate.to_string();
+                continue;
+            }
+        }
+
+        match ttype {
+            TokenType::OpenParen => {
+                paren_depth += 1;
+                // Check if this opens a subquery: AS ( or (SELECT
+                if idx + 1 < tokens.len() && tokens[idx + 1].ttype == TokenType::Word && tokens[idx + 1].val.to_uppercase() == "SELECT" {
+                    subquery_depth += 1;
+                }
+                // Avoid extra space before '(' if preceded by function name or word, unless word was 'AS' or 'IN'
+                if let Some(last) = curr_line.last_mut() {
+                    if last.ends_with(' ') && prev_ttype == Some(TokenType::Word) && prev_word != "AS" && prev_word != "IN" {
+                        *last = last.trim_end().to_string();
+                    }
+                }
+                curr_line.push("(".to_string());
+            }
+            TokenType::CloseParen => {
+                paren_depth = paren_depth.saturating_sub(1);
+                if subquery_depth > paren_depth {
+                    subquery_depth = paren_depth;
+                }
+                if let Some(last) = curr_line.last_mut() {
+                    if last.ends_with(' ') {
+                        *last = last.trim_end().to_string();
+                    }
+                }
+                curr_line.push(") ".to_string());
+            }
+            TokenType::Dot => {
+                if let Some(last) = curr_line.last_mut() {
+                    if last.ends_with(' ') {
+                        *last = last.trim_end().to_string();
+                    }
+                }
+                curr_line.push(".".to_string());
+            }
+            TokenType::Comma => {
+                if let Some(last) = curr_line.last_mut() {
+                    if last.ends_with(' ') {
+                        *last = last.trim_end().to_string();
+                    }
+                }
+                curr_line.push(",".to_string());
+
+                // If in SELECT projection at top-level, align next column neatly
+                if in_select_clause && paren_depth == subquery_depth {
+                    result_lines.push(curr_line.join(""));
+                    curr_line.clear();
+                    curr_line.push(format!("{}       ", "    ".repeat(subquery_depth)));
+                } else {
+                    curr_line.push(" ".to_string());
+                }
+            }
+            TokenType::Semicolon => {
+                if let Some(last) = curr_line.last_mut() {
+                    if last.ends_with(' ') {
+                        *last = last.trim_end().to_string();
+                    }
+                }
+                curr_line.push(";".to_string());
+            }
+            TokenType::Comment => {
+                if !curr_line.is_empty() {
+                    result_lines.push(curr_line.join(""));
+                    curr_line.clear();
+                }
+                result_lines.push(format!("{}{}", "    ".repeat(subquery_depth), tval));
+            }
+            _ => {
+                curr_line.push(format!("{} ", tval));
+            }
+        }
+
+        prev_word = upper;
+        prev_ttype = Some(ttype);
+        idx += 1;
+    }
+
+    if !curr_line.is_empty() {
+        result_lines.push(curr_line.join(""));
+    }
+
+    // Trim trailing whitespace on each line
+    result_lines
+        .into_iter()
+        .map(|line| line.trim_end().to_string())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<String>>()
+        .join("\n")
 }
 
 /// Detects bind variables (:name, :1) in SQL and generates candidate extraction SELECT query
@@ -820,5 +1045,24 @@ mod tests {
         assert_eq!(f1, f2);
         assert_eq!(f2, f3);
         assert_eq!(f1, "SELECT banner\n  FROM v$version;");
+    }
+
+    #[test]
+    fn test_complex_sql_no_identifier_corruption() {
+        let complex_sql = "WITH ORDER_SUMMARY AS ( SELECT O.ORD_ID, O.ORD_DATE, D.ORD_QTY, B.ON_HAND_QTY, ROW_NUMBER() OVER(PARTITION BY D.ITEM_CD ORDER BY D.PAID_AMT DESC) AS ITEM_SALES_RANK FROM TB_ORD_MST O JOIN TB_ORD_DTL D ON O.ORD_ID = D.ORD_ID WHERE O.ORD_DATE >= TO_DATE(:b_start_dt, 'YYYY-MM-DD') AND O.ORD_STATUS IN ('PAY_COMPLETED', 'DELIVERED') AND (:b_cust_grade IS NULL OR C.CUST_GRADE = :b_cust_grade) ) SELECT TPI.PROMO_NM, I.ITEM_CD FROM ORDER_SUMMARY;";
+        let formatted = format_sql(complex_sql);
+
+        // Assert no corrupted words
+        assert!(!formatted.contains("OR D_ID"), "O.ORD_ID was wrongly corrupted to OR D_ID");
+        assert!(!formatted.contains("OR D_DATE"), "O.ORD_DATE was wrongly corrupted to OR D_DATE");
+        assert!(!formatted.contains("OR DER_SUMMARY"), "ORDER_SUMMARY was wrongly corrupted to OR DER_SUMMARY");
+        assert!(!formatted.contains("ON _HAND_QTY"), "B.ON_HAND_QTY was wrongly corrupted to ON _HAND_QTY");
+        assert!(formatted.contains("ORDER_SUMMARY AS"), "ORDER_SUMMARY AS must remain intact");
+        assert!(formatted.contains("O.ORD_ID"), "O.ORD_ID must remain intact");
+        assert!(formatted.contains("B.ON_HAND_QTY"), "B.ON_HAND_QTY must remain intact");
+
+        // Idempotency
+        let formatted2 = format_sql(&formatted);
+        assert_eq!(formatted, formatted2, "Formatting must be idempotent");
     }
 }
