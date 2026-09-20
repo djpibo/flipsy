@@ -3,8 +3,43 @@ use crate::db::mock::MockEngine;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 use std::process::{Command, Stdio};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::sync::mpsc::{channel, Receiver};
+
+#[derive(Clone)]
+pub struct QueryProgressTracker {
+    pub bytes_read: Arc<AtomicUsize>,
+    pub rows_read: Arc<AtomicUsize>,
+    pub is_cancelled: Arc<AtomicBool>,
+}
+
+impl QueryProgressTracker {
+    pub fn new() -> Self {
+        Self {
+            bytes_read: Arc::new(AtomicUsize::new(0)),
+            rows_read: Arc::new(AtomicUsize::new(0)),
+            is_cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+pub struct ExecutionResult {
+    pub query_result: QueryResult,
+    pub plan_nodes: Option<Vec<PlanNode>>,
+    pub plan_hash: Option<u64>,
+    pub sql_id: Option<String>,
+}
+
+pub struct AsyncExecutionHandle {
+    pub start_time: Instant,
+    pub tracker: QueryProgressTracker,
+    pub rx: Receiver<ExecutionResult>,
+    pub is_explain: bool,
+    pub sql: String,
+}
 
 pub struct DatabaseSession {
     pub config: ConnectionConfig,
@@ -141,6 +176,222 @@ impl DatabaseSession {
         }
 
         Ok(stdout)
+    }
+
+    pub fn run_sqlplus_streaming(conn_str: &str, script: &str, tracker: &QueryProgressTracker) -> Result<String, String> {
+        let mut child = Command::new("docker")
+            .args(["exec", "-i", "oracle23ai", "sqlplus", "-L", "-s", conn_str])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Docker 실행 실패: {}", e))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(script.as_bytes());
+        }
+
+        let stdout = child.stdout.take().ok_or_else(|| "stdout 캡처 실패".to_string())?;
+        let mut reader = BufReader::new(stdout);
+        let mut full_output = String::new();
+        let mut line = String::new();
+
+        while let Ok(n) = reader.read_line(&mut line) {
+            if n == 0 {
+                break;
+            }
+            if tracker.is_cancelled.load(Ordering::Relaxed) {
+                let _ = child.kill();
+                return Err("사용자에 의해 쿼리 실행이 중단되었습니다.".to_string());
+            }
+            tracker.bytes_read.fetch_add(n, Ordering::Relaxed);
+            tracker.rows_read.fetch_add(1, Ordering::Relaxed);
+            full_output.push_str(&line);
+            line.clear();
+        }
+
+        let status = child.wait().map_err(|e| format!("Oracle 프로세스 대기 실패: {}", e))?;
+
+        if !status.success() || full_output.contains("ERROR:") || full_output.contains("ORA-") {
+            let mut err_msg = String::new();
+            for l in full_output.lines() {
+                let trimmed = l.trim();
+                if trimmed.starts_with("ORA-") || trimmed.starts_with("SP2-") {
+                    if !err_msg.is_empty() {
+                        err_msg.push(' ');
+                    }
+                    err_msg.push_str(trimmed);
+                }
+            }
+            if err_msg.is_empty() {
+                err_msg = full_output.trim().to_string();
+            }
+            return Err(err_msg);
+        }
+
+        Ok(full_output)
+    }
+
+    pub fn execute_async(&self, sql: &str, is_explain: bool) -> AsyncExecutionHandle {
+        let tracker = QueryProgressTracker::new();
+        let tracker_clone = tracker.clone();
+        let (tx, rx) = channel();
+        let config = self.config.clone();
+        let is_real = self.is_real_oracle;
+        let sql_string = sql.to_string();
+
+        std::thread::spawn(move || {
+            let start = Instant::now();
+            if is_real {
+                let conn_str = format!(
+                    "{}/{}@{}:{}/{}",
+                    config.username, config.password, config.host, config.port, config.service_name
+                );
+
+                let clean_sql = sql_string.trim().trim_end_matches(';');
+
+                if is_explain {
+                    let plan_script = format!(
+                        "EXPLAIN PLAN FOR {};\nSET PAGESIZE 50000\nSET LINESIZE 32767\nSELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('PLAN_TABLE', NULL, 'ALL +OUTLINE +PREDICATE +ALIAS'));\nEXIT;\n",
+                        clean_sql
+                    );
+
+                    let plan_res = DatabaseSession::run_sqlplus_streaming(&conn_str, &plan_script, &tracker_clone);
+                    let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+
+                    match plan_res {
+                        Ok(plan_output) => {
+                            let (nodes, hash, sql_id) = DatabaseSession::parse_xplan_with_meta(&plan_output);
+                            let res = QueryResult {
+                                columns: vec!["PLAN_TABLE_OUTPUT".to_string()],
+                                rows: plan_output.lines().map(|l| vec![l.to_string()]).collect(),
+                                elapsed_ms: elapsed,
+                                row_count: nodes.len(),
+                                sql_id: sql_id.clone().or(Some("ora26ai_live".to_string())),
+                                child_number: Some(0),
+                                plan_hash_value: hash,
+                                message: Some(format!("Oracle 26ai Explain 성공 ({:.2}ms)", elapsed)),
+                            };
+                            let _ = tx.send(ExecutionResult {
+                                query_result: res,
+                                plan_nodes: Some(nodes),
+                                plan_hash: hash,
+                                sql_id: sql_id.or(Some("ora26ai_live".to_string())),
+                            });
+                        }
+                        Err(err) => {
+                            let res = QueryResult {
+                                columns: vec!["ERROR".to_string()],
+                                rows: vec![vec![err.clone()]],
+                                elapsed_ms: elapsed,
+                                row_count: 0,
+                                sql_id: None,
+                                child_number: None,
+                                plan_hash_value: None,
+                                message: Some(format!("Explain 오류: {}", err)),
+                            };
+                            let _ = tx.send(ExecutionResult {
+                                query_result: res,
+                                plan_nodes: None,
+                                plan_hash: None,
+                                sql_id: None,
+                            });
+                        }
+                    }
+                } else {
+                    let query_script = format!(
+                        "SET MARKUP CSV ON QUOTE ON\nSET HEADING ON\nSET FEEDBACK OFF\nSET PAGESIZE 50000\nSET LINESIZE 32767\n{};\nEXIT;\n",
+                        clean_sql
+                    );
+
+                    match DatabaseSession::run_sqlplus_streaming(&conn_str, &query_script, &tracker_clone) {
+                        Ok(csv_output) => {
+                            let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+                            let (cols, rows) = DatabaseSession::parse_csv_output(&csv_output);
+
+                            let plan_script = format!(
+                                "EXPLAIN PLAN FOR {};\nSET PAGESIZE 50000\nSET LINESIZE 32767\nSELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('PLAN_TABLE', NULL, 'ALL +OUTLINE +PREDICATE +ALIAS'));\nEXIT;\n",
+                                clean_sql
+                            );
+
+                            let (plan_nodes, plan_hash, sql_id) = if let Ok(plan_out) = DatabaseSession::run_sqlplus_command(&conn_str, &plan_script) {
+                                let (p, h, s) = DatabaseSession::parse_xplan_with_meta(&plan_out);
+                                (Some(p), h, s.or(Some("ora26ai_live".to_string())))
+                            } else {
+                                (None, None, None)
+                            };
+
+                            let row_count = rows.len();
+                            let total_bytes = tracker_clone.bytes_read.load(Ordering::Relaxed);
+                            let mb = total_bytes as f64 / (1024.0 * 1024.0);
+
+                            let size_desc = if mb >= 1.0 {
+                                format!("{:.2} MB", mb)
+                            } else {
+                                format!("{:.1} KB", total_bytes as f64 / 1024.0)
+                            };
+
+                            let res = QueryResult {
+                                columns: cols,
+                                rows,
+                                elapsed_ms: elapsed,
+                                row_count,
+                                sql_id: sql_id.clone(),
+                                child_number: Some(0),
+                                plan_hash_value: plan_hash,
+                                message: Some(format!(
+                                    "Oracle 26ai Live ({}@{}) - {}건 인출 ({}) in {:.2}ms",
+                                    config.username, config.service_name, row_count, size_desc, elapsed
+                                )),
+                            };
+
+                            let _ = tx.send(ExecutionResult {
+                                query_result: res,
+                                plan_nodes,
+                                plan_hash,
+                                sql_id,
+                            });
+                        }
+                        Err(err) => {
+                            let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+                            let res = QueryResult {
+                                columns: vec!["ERROR".to_string()],
+                                rows: vec![vec![err.clone()]],
+                                elapsed_ms: elapsed,
+                                row_count: 0,
+                                sql_id: None,
+                                child_number: None,
+                                plan_hash_value: None,
+                                message: Some(format!("실행 오류: {}", err)),
+                            };
+                            let _ = tx.send(ExecutionResult {
+                                query_result: res,
+                                plan_nodes: None,
+                                plan_hash: None,
+                                sql_id: None,
+                            });
+                        }
+                    }
+                }
+            } else {
+                std::thread::sleep(Duration::from_millis(350));
+                let (query_res, plan_nodes) = MockEngine::execute(&sql_string);
+                let _ = tx.send(ExecutionResult {
+                    query_result: query_res,
+                    plan_nodes: Some(plan_nodes),
+                    plan_hash: Some(272002086),
+                    sql_id: Some("mock_ora26ai".to_string()),
+                });
+            }
+        });
+
+        AsyncExecutionHandle {
+            start_time: Instant::now(),
+            tracker,
+            rx,
+            is_explain,
+            sql: sql.to_string(),
+        }
     }
 
     pub fn explain(&mut self, sql: &str) {

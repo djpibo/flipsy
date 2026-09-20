@@ -117,9 +117,9 @@ impl EditorView {
                         total_width
                     };
 
-                    // Left Editor Area (with Line Numbers Gutter)
+                    // Left Editor Area (with Line Numbers Gutter & Vertical Scrollbar)
                     ui.allocate_ui_with_layout(
-                        Vec2::new(editor_width, ui.available_height()),
+                        Vec2::new(editor_width, 245.0),
                         egui::Layout::top_down(egui::Align::LEFT),
                         |ui| {
                             egui::Frame::none()
@@ -128,48 +128,54 @@ impl EditorView {
                                 .stroke(Stroke::new(1.0_f32, Color32::from_rgb(228, 228, 231)))
                                 .inner_margin(egui::Margin::symmetric(8.0, 8.0))
                                 .show(ui, |ui| {
-                                    ui.horizontal_top(|ui| {
-                                        // Line numbers gutter
-                                        let line_count = self.sql.split('\n').count().max(1);
-                                        let mut num_str = String::new();
-                                        for i in 1..=line_count {
-                                            num_str.push_str(&format!(" {:>2} \n", i));
-                                        }
+                                    egui::ScrollArea::vertical()
+                                        .id_salt("sql_editor_scroll_v")
+                                        .max_height(229.0)
+                                        .auto_shrink([false, false])
+                                        .show(ui, |ui| {
+                                            ui.horizontal_top(|ui| {
+                                                // Line numbers gutter
+                                                let line_count = self.sql.split('\n').count().max(1);
+                                                let mut num_str = String::new();
+                                                for i in 1..=line_count {
+                                                    num_str.push_str(&format!(" {:>2} \n", i));
+                                                }
 
-                                        ui.vertical(|ui| {
-                                            ui.add_space(1.0);
-                                            ui.label(
-                                                RichText::new(num_str)
+                                                ui.vertical(|ui| {
+                                                    ui.add_space(1.0);
+                                                    ui.label(
+                                                        RichText::new(num_str)
+                                                            .font(FontId::monospace(12.5))
+                                                            .color(Color32::from_rgb(161, 161, 170)),
+                                                    );
+                                                });
+
+                                                // Gutter separator
+                                                let sep_height = (line_count as f32 * 19.0).max(220.0);
+                                                let (sep_rect, _) = ui.allocate_exact_size(Vec2::new(1.0, sep_height), egui::Sense::hover());
+                                                ui.painter().rect_filled(sep_rect, Rounding::ZERO, Color32::from_rgb(228, 228, 231));
+
+                                                ui.add_space(6.0);
+
+                                                // Multiline TextEdit (without border frame)
+                                                let text_edit = egui::TextEdit::multiline(&mut self.sql)
                                                     .font(FontId::monospace(12.5))
-                                                    .color(Color32::from_rgb(161, 161, 170)),
-                                            );
+                                                    .desired_width(f32::INFINITY)
+                                                    .desired_rows(line_count.max(8))
+                                                    .frame(false);
+
+                                                ui.add(text_edit);
+                                            });
                                         });
-
-                                        // Gutter separator
-                                        let sep_height = (line_count as f32 * 18.0).max(160.0);
-                                        let (sep_rect, _) = ui.allocate_exact_size(Vec2::new(1.0, sep_height), egui::Sense::hover());
-                                        ui.painter().rect_filled(sep_rect, Rounding::ZERO, Color32::from_rgb(228, 228, 231));
-
-                                        ui.add_space(6.0);
-
-                                        // Multiline TextEdit (without border frame)
-                                        let text_edit = egui::TextEdit::multiline(&mut self.sql)
-                                            .font(FontId::monospace(12.5))
-                                            .desired_width(f32::INFINITY)
-                                            .desired_rows(8)
-                                            .frame(false);
-
-                                        ui.add(text_edit);
-                                    });
                                 });
                         },
                     );
 
-                    // Right Sidebar Area
+                    // Right Sidebar Area (with vertical scrollbar)
                     if has_sidebar {
                         ui.add_space(8.0);
                         ui.allocate_ui_with_layout(
-                            Vec2::new(sidebar_width, ui.available_height()),
+                            Vec2::new(sidebar_width, 245.0),
                             egui::Layout::top_down(egui::Align::LEFT),
                             |ui| {
                                 egui::Frame::none()
@@ -178,21 +184,27 @@ impl EditorView {
                                     .stroke(Stroke::new(1.0_f32, Color32::from_rgb(212, 212, 216)))
                                     .inner_margin(egui::Margin::same(10.0))
                                     .show(ui, |ui| {
-                                        match self.active_sidebar {
-                                            SidebarMode::None => {}
-                                            SidebarMode::Figure => {
-                                                Self::render_figure_sidebar(ui, &self.sql, &mut self.active_sidebar);
-                                            }
-                                            SidebarMode::Bind => {
-                                                Self::render_bind_sidebar(
-                                                    ui,
-                                                    &self.sql,
-                                                    &mut self.active_sidebar,
-                                                    &mut self.copied_feedback,
-                                                    &mut action.execute_custom_sql,
-                                                );
-                                            }
-                                        }
+                                        egui::ScrollArea::vertical()
+                                            .id_salt("sidebar_scroll_v")
+                                            .max_height(225.0)
+                                            .auto_shrink([false, false])
+                                            .show(ui, |ui| {
+                                                match self.active_sidebar {
+                                                    SidebarMode::None => {}
+                                                    SidebarMode::Figure => {
+                                                        Self::render_figure_sidebar(ui, &self.sql, &mut self.active_sidebar);
+                                                    }
+                                                    SidebarMode::Bind => {
+                                                        Self::render_bind_sidebar(
+                                                            ui,
+                                                            &self.sql,
+                                                            &mut self.active_sidebar,
+                                                            &mut self.copied_feedback,
+                                                            &mut action.execute_custom_sql,
+                                                        );
+                                                    }
+                                                }
+                                            });
                                     });
                             },
                         );
