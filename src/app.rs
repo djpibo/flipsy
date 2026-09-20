@@ -177,73 +177,74 @@ impl eframe::App for FlipsyApp {
                                     });
                                 });
 
-                            // Right Action Buttons: Line-up, Figure, Bind, Run
+                            // Right Action Buttons: Line-up, Figure, Bind, Run (Unified Monochrome Palette)
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                // 1. Run (Rightmost)
+                                // 1. Run (Primary Solid Action Button)
                                 let run_btn = egui::Button::new(
                                     RichText::new("▶ Run (Ctrl+Enter)")
-                                        .size(12.0)
+                                        .size(11.5)
                                         .strong()
                                         .color(Color32::WHITE),
                                 )
                                 .fill(Color32::from_rgb(24, 24, 27))
+                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(24, 24, 27)))
                                 .rounding(Rounding::same(4.0))
-                                .min_size(Vec2::new(130.0, 28.0));
+                                .min_size(Vec2::new(125.0, 28.0));
 
                                 if ui.add(run_btn).clicked() {
                                     run_requested = true;
                                 }
 
-                                ui.add_space(6.0);
+                                ui.add_space(5.0);
 
                                 // 2. Bind
                                 let is_bind = editor.active_sidebar == SidebarMode::Bind;
                                 let bind_btn = egui::Button::new(
                                     RichText::new("Bind (바인드)")
-                                        .size(11.5)
+                                        .size(11.0)
                                         .strong()
-                                        .color(if is_bind { Color32::WHITE } else { Color32::from_rgb(2, 132, 199) }),
+                                        .color(if is_bind { Color32::WHITE } else { Color32::from_rgb(39, 39, 42) }),
                                 )
-                                .fill(if is_bind { Color32::from_rgb(2, 132, 199) } else { Color32::from_rgb(240, 249, 255) })
-                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(186, 230, 253)))
+                                .fill(if is_bind { Color32::from_rgb(39, 39, 42) } else { Color32::WHITE })
+                                .stroke(Stroke::new(1.0_f32, if is_bind { Color32::from_rgb(24, 24, 27) } else { Color32::from_rgb(212, 212, 216) }))
                                 .rounding(Rounding::same(4.0))
-                                .min_size(Vec2::new(95.0, 28.0));
+                                .min_size(Vec2::new(88.0, 28.0));
 
                                 if ui.add(bind_btn).clicked() {
                                     editor.toggle_bind();
                                 }
 
-                                ui.add_space(6.0);
+                                ui.add_space(5.0);
 
                                 // 3. Figure
                                 let is_fig = editor.active_sidebar == SidebarMode::Figure;
                                 let fig_btn = egui::Button::new(
                                     RichText::new("Figure (구조)")
-                                        .size(11.5)
+                                        .size(11.0)
                                         .strong()
-                                        .color(if is_fig { Color32::WHITE } else { Color32::from_rgb(126, 34, 206) }),
+                                        .color(if is_fig { Color32::WHITE } else { Color32::from_rgb(39, 39, 42) }),
                                 )
-                                .fill(if is_fig { Color32::from_rgb(147, 51, 234) } else { Color32::from_rgb(250, 245, 255) })
-                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(233, 213, 255)))
+                                .fill(if is_fig { Color32::from_rgb(39, 39, 42) } else { Color32::WHITE })
+                                .stroke(Stroke::new(1.0_f32, if is_fig { Color32::from_rgb(24, 24, 27) } else { Color32::from_rgb(212, 212, 216) }))
                                 .rounding(Rounding::same(4.0))
-                                .min_size(Vec2::new(95.0, 28.0));
+                                .min_size(Vec2::new(88.0, 28.0));
 
                                 if ui.add(fig_btn).clicked() {
                                     editor.toggle_figure();
                                 }
 
-                                ui.add_space(6.0);
+                                ui.add_space(5.0);
 
                                 // 4. Line-up (Leftmost)
                                 let fmt_btn = egui::Button::new(
                                     RichText::new("Line-up (F8)")
-                                        .size(11.5)
-                                        .color(Color32::from_rgb(24, 24, 27)),
+                                        .size(11.0)
+                                        .color(Color32::from_rgb(39, 39, 42)),
                                 )
-                                .fill(Color32::from_rgb(244, 244, 245))
-                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(228, 228, 231)))
+                                .fill(Color32::WHITE)
+                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(212, 212, 216)))
                                 .rounding(Rounding::same(4.0))
-                                .min_size(Vec2::new(95.0, 28.0));
+                                .min_size(Vec2::new(88.0, 28.0));
 
                                 if ui.add(fmt_btn).clicked() {
                                     editor.format_lines();

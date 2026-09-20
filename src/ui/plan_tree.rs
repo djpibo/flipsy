@@ -153,7 +153,8 @@ impl PlanTreeView {
                 .stroke(Stroke::new(1.0_f32, stroke_color))
                 .inner_margin(egui::Margin::symmetric(12.0, 8.0))
                 .show(ui, |ui| {
-                    ui.set_min_width(540.0);
+                    ui.vertical(|ui| {
+                        ui.set_min_width(540.0);
 
                     // Header line: Id, Operation, Object Name, Bottleneck Tag
                     ui.horizontal(|ui| {
@@ -309,7 +310,7 @@ impl PlanTreeView {
                     if node.access_predicates.is_some() || node.filter_predicates.is_some() {
                         ui.add_space(4.0);
                         if let Some(access) = &node.access_predicates {
-                            ui.horizontal_wrapped(|ui| {
+                            ui.horizontal(|ui| {
                                 egui::Frame::none()
                                     .fill(if node.is_bottleneck { Color32::from_rgb(20, 45, 55) } else { Color32::from_rgb(236, 254, 255) })
                                     .rounding(Rounding::same(3.0))
@@ -318,16 +319,17 @@ impl PlanTreeView {
                                     .show(ui, |ui| {
                                         ui.label(RichText::new("ACCESS").size(9.5).strong().color(Color32::from_rgb(8, 145, 178)));
                                     });
-                                ui.label(
+                                ui.add(egui::Label::new(
                                     RichText::new(access)
                                         .size(10.5)
                                         .monospace()
                                         .color(if node.is_bottleneck { Color32::from_rgb(207, 250, 254) } else { Color32::from_rgb(15, 23, 42) }),
-                                );
+                                ).wrap());
                             });
                         }
                         if let Some(filter) = &node.filter_predicates {
-                            ui.horizontal_wrapped(|ui| {
+                            ui.add_space(2.0);
+                            ui.horizontal(|ui| {
                                 egui::Frame::none()
                                     .fill(if node.is_bottleneck { Color32::from_rgb(55, 40, 15) } else { Color32::from_rgb(254, 252, 232) })
                                     .rounding(Rounding::same(3.0))
@@ -336,12 +338,12 @@ impl PlanTreeView {
                                     .show(ui, |ui| {
                                         ui.label(RichText::new("FILTER").size(9.5).strong().color(Color32::from_rgb(202, 138, 4)));
                                     });
-                                ui.label(
+                                ui.add(egui::Label::new(
                                     RichText::new(filter)
                                         .size(10.5)
                                         .monospace()
                                         .color(if node.is_bottleneck { Color32::from_rgb(254, 243, 199) } else { Color32::from_rgb(15, 23, 42) }),
-                                );
+                                ).wrap());
                             });
                         }
                     }
@@ -349,7 +351,7 @@ impl PlanTreeView {
                     // Correlated Outline Hints
                     if !node.outline_hints.is_empty() {
                         ui.add_space(3.0);
-                        ui.horizontal_wrapped(|ui| {
+                        ui.horizontal(|ui| {
                             egui::Frame::none()
                                 .fill(if node.is_bottleneck { Color32::from_rgb(45, 25, 60) } else { Color32::from_rgb(245, 243, 255) })
                                 .rounding(Rounding::same(3.0))
@@ -358,16 +360,16 @@ impl PlanTreeView {
                                 .show(ui, |ui| {
                                     ui.label(RichText::new("OUTLINE").size(9.5).strong().color(Color32::from_rgb(147, 51, 234)));
                                 });
-                            for hint in &node.outline_hints {
-                                ui.label(
-                                    RichText::new(hint)
-                                        .size(10.0)
-                                        .monospace()
-                                        .color(if node.is_bottleneck { Color32::from_rgb(233, 213, 255) } else { Color32::from_rgb(88, 28, 135) }),
-                                );
-                            }
+                            let hints_joined = node.outline_hints.join("  ");
+                            ui.add(egui::Label::new(
+                                RichText::new(hints_joined)
+                                    .size(10.0)
+                                    .monospace()
+                                    .color(if node.is_bottleneck { Color32::from_rgb(233, 213, 255) } else { Color32::from_rgb(88, 28, 135) }),
+                            ).wrap());
                         });
                     }
+                    });
                 });
         });
 
