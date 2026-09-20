@@ -1,5 +1,9 @@
 use eframe::egui::{self, Color32, FontId, Key, RichText, Rounding, Stroke, Vec2};
-use crate::db::session::{analyze_query_structure, format_sql, generate_bind_extraction_query};
+use crate::db::session::{
+    analyze_query_structure, default_bind_value, extract_bind_variables, format_sql,
+    generate_bind_extraction_query, substitute_bind_variables,
+};
+use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SidebarMode {
@@ -18,6 +22,7 @@ pub struct EditorView {
     pub sql: String,
     pub active_sidebar: SidebarMode,
     pub copied_feedback: bool,
+    pub bind_values: HashMap<String, String>,
 }
 
 impl EditorView {
@@ -38,6 +43,7 @@ impl EditorView {
             sql: initial_sql.to_string(),
             active_sidebar: SidebarMode::None,
             copied_feedback: false,
+            bind_values: HashMap::new(),
         }
     }
 
@@ -198,6 +204,7 @@ impl EditorView {
                                                         Self::render_bind_sidebar(
                                                             ui,
                                                             &self.sql,
+                                                            &mut self.bind_values,
                                                             &mut self.active_sidebar,
                                                             &mut self.copied_feedback,
                                                             &mut action.execute_custom_sql,
@@ -332,16 +339,18 @@ impl EditorView {
     fn render_bind_sidebar(
         ui: &mut egui::Ui,
         sql: &str,
+        bind_values: &mut HashMap<String, String>,
         active_sidebar: &mut SidebarMode,
         copied_feedback: &mut bool,
         execute_custom_sql: &mut Option<String>,
     ) {
+        let binds = extract_bind_variables(sql);
         let candidate = generate_bind_extraction_query(sql);
 
         // Sidebar Header
         ui.horizontal(|ui| {
             ui.label(
-                RichText::new("🔍 Bind (바인드 변수 추출)")
+                RichText::new("🔍 Bind (바인드 변수 설정)")
                     .size(12.0)
                     .strong()
                     .color(Color32::from_rgb(24, 24, 27)),
@@ -358,32 +367,95 @@ impl EditorView {
         ui.separator();
         ui.add_space(6.0);
 
-        match candidate {
-            Some(bind_query) => {
-                ui.label(
-                    RichText::new("바인드 변수가 감지되었습니다.\n실제 Oracle에서 샘플값을 추출하는 SELECT 쿼리입니다.")
-                        .size(11.0)
-                        .color(Color32::from_rgb(71, 85, 105)),
-                );
+        if binds.is_empty() {
+            ui.label(
+                RichText::new("SQL에 바인드 변수(:var_name)가\n감지되지 않았습니다.")
+                    .size(11.5)
+                    .color(Color32::from_rgb(148, 163, 184)),
+            );
+        } else {
+            ui.label(
+                RichText::new(format!("감지된 바인드 변수 ({}개):", binds.len()))
+                    .size(11.0)
+                    .strong()
+                    .color(Color32::from_rgb(79, 70, 229)),
+            );
+            ui.add_space(4.0);
 
+            // Bind variable input form
+            for b in &binds {
+                let val = bind_values.entry(b.clone()).or_insert_with(|| default_bind_value(b));
+                ui.horizontal(|ui| {
+                    egui::Frame::none()
+                        .fill(Color32::from_rgb(238, 242, 255))
+                        .rounding(Rounding::same(3.0))
+                        .inner_margin(egui::Margin::symmetric(5.0, 2.0))
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new(format!(":{}", b))
+                                    .size(10.5)
+                                    .monospace()
+                                    .strong()
+                                    .color(Color32::from_rgb(67, 56, 202)),
+                            );
+                        });
+
+                    ui.add(
+                        egui::TextEdit::singleline(val)
+                            .desired_width(170.0)
+                            .font(FontId::monospace(11.0)),
+                    );
+                });
+                ui.add_space(3.0);
+            }
+
+            ui.add_space(6.0);
+
+            // Apply & Run Button
+            let apply_run_btn = egui::Button::new(
+                RichText::new("▶ 바인드 변수 적용하여 실행")
+                    .size(11.5)
+                    .strong()
+                    .color(Color32::WHITE),
+            )
+            .fill(Color32::from_rgb(16, 185, 129))
+            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(16, 185, 129)))
+            .rounding(Rounding::same(4.0))
+            .min_size(Vec2::new(290.0, 28.0));
+
+            if ui.add(apply_run_btn).clicked() {
+                let substituted = substitute_bind_variables(sql, bind_values);
+                *execute_custom_sql = Some(substituted);
+            }
+
+            if let Some(bind_query) = candidate {
+                ui.add_space(8.0);
+                ui.separator();
                 ui.add_space(6.0);
+                ui.label(
+                    RichText::new("DB 샘플값 자동 추출 쿼리:")
+                        .size(10.5)
+                        .strong()
+                        .color(Color32::from_rgb(113, 113, 122)),
+                );
+                ui.add_space(4.0);
 
                 // Extraction SQL Box
                 egui::Frame::none()
                     .fill(Color32::from_rgb(248, 250, 252))
                     .rounding(Rounding::same(4.0))
                     .stroke(Stroke::new(1.0_f32, Color32::from_rgb(203, 213, 225)))
-                    .inner_margin(egui::Margin::same(8.0))
+                    .inner_margin(egui::Margin::same(6.0))
                     .show(ui, |ui| {
                         ui.label(
                             RichText::new(&bind_query)
-                                .size(11.0)
+                                .size(10.5)
                                 .monospace()
                                 .color(Color32::from_rgb(30, 41, 59)),
                         );
                     });
 
-                ui.add_space(8.0);
+                ui.add_space(6.0);
 
                 // Action Buttons: Copy and Run
                 ui.horizontal(|ui| {
@@ -406,20 +478,13 @@ impl EditorView {
                             .strong()
                             .color(Color32::WHITE),
                     )
-                    .fill(Color32::from_rgb(16, 185, 129))
+                    .fill(Color32::from_rgb(2, 132, 199))
                     .rounding(Rounding::same(4.0));
 
                     if ui.add(exec_btn).clicked() {
                         *execute_custom_sql = Some(bind_query.clone());
                     }
                 });
-            }
-            None => {
-                ui.label(
-                    RichText::new("SQL에 바인드 변수(:var_name)가\n감지되지 않았습니다.")
-                        .size(11.5)
-                        .color(Color32::from_rgb(148, 163, 184)),
-                );
             }
         }
     }

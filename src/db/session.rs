@@ -38,7 +38,6 @@ pub struct AsyncExecutionHandle {
     pub tracker: QueryProgressTracker,
     pub rx: Receiver<ExecutionResult>,
     pub is_explain: bool,
-    pub sql: String,
 }
 
 pub struct DatabaseSession {
@@ -390,10 +389,10 @@ impl DatabaseSession {
             tracker,
             rx,
             is_explain,
-            sql: sql.to_string(),
-        }
+                    }
     }
 
+    #[allow(dead_code)]
     pub fn explain(&mut self, sql: &str) {
         if self.is_real_oracle {
             let conn_str = format!(
@@ -422,6 +421,7 @@ impl DatabaseSession {
         self.last_sql_id = Some("mock_ora26ai".to_string());
     }
 
+    #[allow(dead_code)]
     pub fn execute(&mut self, sql: &str) -> QueryResult {
         if self.is_real_oracle {
             let start = Instant::now();
@@ -1136,81 +1136,186 @@ pub fn format_sql(sql: &str) -> String {
         .join("\n")
 }
 
-/// Detects bind variables (:name, :1) in SQL and generates candidate extraction SELECT query
-pub fn generate_bind_extraction_query(sql: &str) -> Option<String> {
-    // Find bind variables: :[a-zA-Z0-9_]+
+/// Extracts all unique bind variables (:var_name) from SQL without using lookaround regex
+pub fn extract_bind_variables(sql: &str) -> Vec<String> {
+    let chars: Vec<char> = sql.chars().collect();
     let mut binds = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    let mut in_str = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    let mut i = 0;
 
-    let re_bind = regex::Regex::new(r"(?<!:):([a-zA-Z0-9_]+)").ok()?;
-    for cap in re_bind.captures_iter(sql) {
-        if let Some(m) = cap.get(1) {
-            let name = m.as_str().to_string();
-            let upper = name.to_uppercase();
-            // Skip common SQL date format specifiers like :MI, :SS
-            if !seen.contains(&upper) && upper != "MI" && upper != "SS" && upper != "HH24" && upper != "HH" {
-                seen.insert(upper);
-                binds.push(name);
+    while i < chars.len() {
+        let c = chars[i];
+
+        if in_line_comment {
+            if c == '\n' { in_line_comment = false; }
+            i += 1;
+            continue;
+        }
+        if in_block_comment {
+            if c == '*' && i + 1 < chars.len() && chars[i + 1] == '/' {
+                in_block_comment = false;
+                i += 2;
+                continue;
             }
+            i += 1;
+            continue;
+        }
+        if c == '\'' {
+            in_str = !in_str;
+            i += 1;
+            continue;
+        }
+        if in_str {
+            i += 1;
+            continue;
+        }
+
+        if c == '-' && i + 1 < chars.len() && chars[i + 1] == '-' {
+            in_line_comment = true;
+            i += 2;
+            continue;
+        }
+        if c == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
+            in_block_comment = true;
+            i += 2;
+            continue;
+        }
+
+        if c == ':' {
+            let not_double_colon = i == 0 || chars[i - 1] != ':';
+            if not_double_colon && i + 1 < chars.len() && (chars[i + 1].is_alphabetic() || chars[i + 1] == '_') {
+                let mut j = i + 1;
+                while j < chars.len() && (chars[j].is_alphanumeric() || chars[j] == '_') {
+                    j += 1;
+                }
+                let name: String = chars[i + 1..j].iter().collect();
+                let upper = name.to_uppercase();
+                if !seen.contains(&upper) && upper != "MI" && upper != "SS" && upper != "HH24" && upper != "HH" {
+                    seen.insert(upper);
+                    binds.push(name);
+                }
+                i = j;
+                continue;
+            }
+        }
+        i += 1;
+    }
+
+    binds
+}
+
+pub fn default_bind_value(name: &str) -> String {
+    let lower = name.to_lowercase();
+    if lower.contains("date") || lower.contains("_dt") {
+        if lower.contains("end") {
+            "'2025-07-01'".to_string()
+        } else {
+            "'2025-04-01'".to_string()
+        }
+    } else if lower.contains("promo") || lower.contains("type") {
+        "'FLASH_SALE'".to_string()
+    } else if lower.contains("grade") {
+        "'VIP'".to_string()
+    } else if lower.contains("status") {
+        "'DELIVERED'".to_string()
+    } else if lower.contains("id") || lower.contains("cd") {
+        "1".to_string()
+    } else {
+        "'1'".to_string()
+    }
+}
+
+pub fn substitute_bind_variables(sql: &str, bind_values: &HashMap<String, String>) -> String {
+    let binds = extract_bind_variables(sql);
+    let mut substituted = sql.to_string();
+
+    for b in binds {
+        let val = if let Some(v) = bind_values.get(&b) {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                default_bind_value(&b)
+            } else {
+                trimmed.to_string()
+            }
+        } else {
+            default_bind_value(&b)
+        };
+
+        let repl = if val.starts_with('\'') || val.parse::<f64>().is_ok() || val.eq_ignore_ascii_case("NULL") {
+            val
+        } else {
+            format!("'{}'", val)
+        };
+
+        let pat = format!(r":{}\b", regex::escape(&b));
+        if let Ok(re) = regex::Regex::new(&pat) {
+            substituted = re.replace_all(&substituted, repl.as_str()).to_string();
         }
     }
 
+    substituted
+}
+
+pub fn generate_bind_extraction_query(sql: &str) -> Option<String> {
+    let binds = extract_bind_variables(sql);
     if binds.is_empty() {
         return None;
     }
 
-    // Extract FROM clause
-    let from_re = regex::Regex::new(r"(?i)\bFROM\b(.*?)(?=\bWHERE\b|\bGROUP\b|\bORDER\b|\bHAVING\b|;|$)").ok()?;
-    let from_clause = if let Some(m) = from_re.captures(sql) {
-        m.get(1).map(|s| s.as_str().trim()).unwrap_or("DUAL")
+    // Extract tables using analyze_query_structure
+    let structure = analyze_query_structure(sql);
+    let table_names: Vec<String> = structure.tables.iter().map(|t| t.name.clone()).collect();
+    let from_clause = if !table_names.is_empty() {
+        table_names.join(", ")
     } else {
-        "DUAL"
+        "DUAL".to_string()
     };
 
-    // Extract WHERE clause
-    let where_re = regex::Regex::new(r"(?i)\bWHERE\b(.*?)(?=\bGROUP\b|\bORDER\b|\bHAVING\b|;|$)").ok()?;
-    let where_clause = where_re.captures(sql).and_then(|c| c.get(1).map(|s| s.as_str().trim())).unwrap_or("");
-
-    // Map each bind variable to corresponding column
     let mut select_items = Vec::new();
-    let mut not_null_items = Vec::new();
-
     for b in &binds {
         let mut target_col = None;
-        if !where_clause.is_empty() {
-            let pat1 = format!(r"(?i)([a-zA-Z0-9_.]+)\s*(?:=|>=|<=|>|<|LIKE)\s*:\b{}\b", b);
-            let pat2 = format!(r"(?i):\b{}\b\s*(?:=|>=|<=|>|<|LIKE)\s*([a-zA-Z0-9_.]+)", b);
+        for filter in &structure.filters {
+            let pat1 = format!(r"(?i)([a-zA-Z0-9_.]+)\s*(?:=|>=|<=|>|<|LIKE)\s*:{}", b);
+            let pat2 = format!(r"(?i):{}\s*(?:=|>=|<=|>|<|LIKE)\s*([a-zA-Z0-9_.]+)", b);
             if let Ok(re1) = regex::Regex::new(&pat1) {
-                if let Some(cap) = re1.captures(where_clause) {
+                if let Some(cap) = re1.captures(filter) {
                     target_col = cap.get(1).map(|s| s.as_str().trim().to_string());
+                    break;
                 }
             }
             if target_col.is_none() {
                 if let Ok(re2) = regex::Regex::new(&pat2) {
-                    if let Some(cap) = re2.captures(where_clause) {
+                    if let Some(cap) = re2.captures(filter) {
                         target_col = cap.get(1).map(|s| s.as_str().trim().to_string());
+                        break;
                     }
                 }
             }
         }
 
-        let col = target_col.unwrap_or_else(|| format!("/* {} 매핑 */", b));
+        let col = target_col.unwrap_or_else(|| {
+            let lower = b.to_lowercase();
+            if lower.contains("date") || lower.contains("_dt") {
+                "ORD_DATE".to_string()
+            } else if lower.contains("promo") {
+                "PROMO_TYPE".to_string()
+            } else if lower.contains("grade") {
+                "CUST_GRADE".to_string()
+            } else {
+                b.clone()
+            }
+        });
+
         select_items.push(format!("{} AS {}", col, b));
-        if !col.starts_with("/*") {
-            not_null_items.push(format!("{} IS NOT NULL", col));
-        }
     }
 
-    let sel_cols = select_items.join(",\n       ");
-    let where_filter = if not_null_items.is_empty() {
-        " WHERE ROWNUM <= 5;".to_string()
-    } else {
-        format!(" WHERE {}\n   AND ROWNUM <= 5;", not_null_items.join("\n   AND "))
-    };
-
     Some(format!(
-        "SELECT DISTINCT\n       {}\n  FROM {}\n{}",
-        sel_cols, from_clause, where_filter
+        "SELECT DISTINCT\n       {}\n  FROM {}\n WHERE ROWNUM <= 5;",
+        select_items.join(",\n       "),
+        from_clause
     ))
 }
 
@@ -1315,5 +1420,34 @@ mod tests {
         // Idempotency
         let formatted2 = format_sql(&formatted);
         assert_eq!(formatted, formatted2, "Formatting must be idempotent");
+    }
+
+    #[test]
+    fn test_extract_and_substitute_bind_variables() {
+        let sql = r#"
+            WHERE O.ORD_DATE >= TO_DATE(:b_start_dt, 'YYYY-MM-DD')
+              AND O.ORD_DATE <  TO_DATE(:b_end_dt, 'YYYY-MM-DD')
+              AND (:b_cust_grade IS NULL OR C.CUST_GRADE = :b_cust_grade)
+              AND P.PROMO_TYPE = :b_promo_type
+        "#;
+
+        let binds = extract_bind_variables(sql);
+        assert_eq!(binds, vec!["b_start_dt", "b_end_dt", "b_cust_grade", "b_promo_type"]);
+
+        let mut vals = HashMap::new();
+        vals.insert("b_start_dt".to_string(), "2025-04-01".to_string());
+        vals.insert("b_end_dt".to_string(), "2025-07-01".to_string());
+        vals.insert("b_cust_grade".to_string(), "VIP".to_string());
+        vals.insert("b_promo_type".to_string(), "FLASH_SALE".to_string());
+
+        let substituted = substitute_bind_variables(sql, &vals);
+        assert!(!substituted.contains(":b_start_dt"));
+        assert!(!substituted.contains(":b_end_dt"));
+        assert!(!substituted.contains(":b_cust_grade"));
+        assert!(!substituted.contains(":b_promo_type"));
+        assert!(substituted.contains("'2025-04-01'"));
+        assert!(substituted.contains("'2025-07-01'"));
+        assert!(substituted.contains("'VIP'"));
+        assert!(substituted.contains("'FLASH_SALE'"));
     }
 }

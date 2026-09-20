@@ -410,7 +410,13 @@ impl eframe::App for FlipsyApp {
                             if ui.add(plan_btn).clicked() {
                                 *active_bottom_tab = BottomTab::PlanTree;
                                 if session.last_plan.is_none() && self.active_query.is_none() {
-                                    self.active_query = Some(session.execute_async(&editor.sql, true));
+                                    let binds = crate::db::session::extract_bind_variables(&editor.sql);
+                                    let sql_to_explain = if !binds.is_empty() {
+                                        crate::db::session::substitute_bind_variables(&editor.sql, &editor.bind_values)
+                                    } else {
+                                        editor.sql.clone()
+                                    };
+                                    self.active_query = Some(session.execute_async(&sql_to_explain, true));
                                 }
                             }
                         });
@@ -428,11 +434,23 @@ impl eframe::App for FlipsyApp {
                     });
 
                 if run_requested && self.active_query.is_none() {
-                    self.active_query = Some(session.execute_async(&editor.sql, false));
+                    let binds = crate::db::session::extract_bind_variables(&editor.sql);
+                    let sql_to_run = if !binds.is_empty() {
+                        crate::db::session::substitute_bind_variables(&editor.sql, &editor.bind_values)
+                    } else {
+                        editor.sql.clone()
+                    };
+                    self.active_query = Some(session.execute_async(&sql_to_run, false));
                 }
 
                 if explain_requested && self.active_query.is_none() {
-                    self.active_query = Some(session.execute_async(&editor.sql, true));
+                    let binds = crate::db::session::extract_bind_variables(&editor.sql);
+                    let sql_to_explain = if !binds.is_empty() {
+                        crate::db::session::substitute_bind_variables(&editor.sql, &editor.bind_values)
+                    } else {
+                        editor.sql.clone()
+                    };
+                    self.active_query = Some(session.execute_async(&sql_to_explain, true));
                 }
 
                 if return_to_servers {
