@@ -538,100 +538,126 @@ impl DatabaseSession {
 }
 
 
-/// Pure Rust SQL Line Formatter & Pretty-Printer (0.1ms deterministic formatting)
+/// Pure Rust SQL Line Formatter & Pretty-Printer (Idempotent 0.05ms deterministic formatting)
 pub fn format_sql(sql: &str) -> String {
     let trimmed = sql.trim();
     if trimmed.is_empty() {
         return String::new();
     }
 
+    // 1. Normalize all whitespace outside single quotes
     let chars: Vec<char> = trimmed.chars().collect();
-    let mut i = 0;
-    let len = chars.len();
-
     let mut in_str = false;
-    let mut normalized = String::new();
-
-    while i < len {
+    let mut norm = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
         let c = chars[i];
         if c == '\'' {
             in_str = !in_str;
-            normalized.push(c);
-        } else if !in_str && (c == '\n' || c == '\r' || c == '\t') {
-            normalized.push(' ');
+            norm.push(c);
+        } else if !in_str && (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+            if !norm.is_empty() && norm[norm.len() - 1] != ' ' {
+                norm.push(' ');
+            }
         } else {
-            normalized.push(c);
+            norm.push(c);
         }
         i += 1;
     }
 
-    // Standard major clause delimiters
+    let clean_sql: String = norm.into_iter().collect();
+
+    // 2. Clause replacements with regex
     let clauses = [
-        ("SELECT", "\nSELECT\n"),
-        ("FROM", "\n  FROM "),
-        ("WHERE", "\n WHERE "),
-        ("AND", "\n   AND "),
-        ("OR", "\n    OR "),
-        ("LEFT JOIN", "\n  LEFT JOIN "),
-        ("RIGHT JOIN", "\n  RIGHT JOIN "),
-        ("INNER JOIN", "\n  INNER JOIN "),
-        ("JOIN", "\n  JOIN "),
-        ("ON", "\n    ON "),
-        ("ORDER BY", "\n ORDER BY "),
-        ("GROUP BY", "\n GROUP BY "),
-        ("HAVING", "\n HAVING "),
+        (r"(?i)\bSELECT\s*", "\nSELECT\n"),
+        (r"(?i)\bFROM\s*", "\n  FROM "),
+        (r"(?i)\bWHERE\s*", "\n WHERE "),
+        (r"(?i)\bAND\s*", "\n   AND "),
+        (r"(?i)\bOR\s*", "\n    OR "),
+        (r"(?i)\bLEFT\s+JOIN\s*", "\n  LEFT JOIN "),
+        (r"(?i)\bRIGHT\s+JOIN\s*", "\n  RIGHT JOIN "),
+        (r"(?i)\bINNER\s+JOIN\s*", "\n  INNER JOIN "),
+        (r"(?i)\bJOIN\s*", "\n  JOIN "),
+        (r"(?i)\bON\s*", "\n    ON "),
+        (r"(?i)\bORDER\s+BY\s*", "\n ORDER BY "),
+        (r"(?i)\bGROUP\s+BY\s*", "\n GROUP BY "),
+        (r"(?i)\bHAVING\s*", "\n HAVING "),
     ];
 
-    let mut formatted = normalized;
-    for (kw, repl) in clauses {
-        let pat = format!("(?i)\\b{}\\b", kw);
-        if let Ok(re) = regex::Regex::new(&pat) {
+    let mut formatted = clean_sql;
+    for (pat, repl) in clauses {
+        if let Ok(re) = regex::Regex::new(pat) {
             formatted = re.replace_all(&formatted, repl).to_string();
         }
     }
 
+    // 3. Line-by-line clean up & column formatting
+    let re_spaces = regex::Regex::new(r"\s+").unwrap();
     let mut result_lines = Vec::new();
-    let mut lines = formatted.lines();
+    let raw_lines: Vec<&str> = formatted.split('\n').collect();
+    let mut line_idx = 0;
 
-    while let Some(line) = lines.next() {
-        let l = line.trim();
-        if l.is_empty() {
+    while line_idx < raw_lines.len() {
+        let line = raw_lines[line_idx].trim();
+        line_idx += 1;
+        if line.is_empty() {
             continue;
         }
 
-        if l.eq_ignore_ascii_case("SELECT") {
-            if let Some(next_line) = lines.next() {
-                let cols: Vec<&str> = next_line.split(',').map(|s| s.trim()).collect();
-                for (idx, col) in cols.iter().enumerate() {
-                    let comma = if idx < cols.len() - 1 { "," } else { "" };
-                    if idx == 0 {
-                        result_lines.push(format!("SELECT {}{}", col, comma));
-                    } else {
-                        result_lines.push(format!("       {}{}", col, comma));
+        // collapse internal multiple spaces
+        let single_spaced = re_spaces.replace_all(line, " ").to_string();
+        let upper = single_spaced.to_uppercase();
+
+        if upper == "SELECT" {
+            if line_idx < raw_lines.len() {
+                let cols_line = raw_lines[line_idx].trim();
+                line_idx += 1;
+                let cols: Vec<&str> = cols_line.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+                if cols.is_empty() {
+                    result_lines.push("SELECT".to_string());
+                } else {
+                    for (idx, col) in cols.iter().enumerate() {
+                        let comma = if idx < cols.len() - 1 { "," } else { "" };
+                        if idx == 0 {
+                            result_lines.push(format!("SELECT {}{}", col, comma));
+                        } else {
+                            result_lines.push(format!("       {}{}", col, comma));
+                        }
                     }
                 }
             } else {
                 result_lines.push("SELECT".to_string());
             }
-        } else if l.starts_with("FROM ") || l.starts_with("JOIN ") || l.starts_with("LEFT JOIN ") || l.starts_with("RIGHT JOIN ") {
-            result_lines.push(format!("  {}", l));
-        } else if l.starts_with("ON ") {
-            result_lines.push(format!("    {}", l));
-        } else if l.starts_with("WHERE ") || l.starts_with("ORDER BY ") || l.starts_with("GROUP BY ") {
-            result_lines.push(format!(" {}", l));
-        } else if l.starts_with("AND ") || l.starts_with("OR ") {
-            result_lines.push(format!("   {}", l));
+        } else if upper.starts_with("FROM ") {
+            result_lines.push(format!("  FROM {}", single_spaced[5..].trim()));
+        } else if upper.starts_with("WHERE ") {
+            result_lines.push(format!(" WHERE {}", single_spaced[6..].trim()));
+        } else if upper.starts_with("AND ") {
+            result_lines.push(format!("   AND {}", single_spaced[4..].trim()));
+        } else if upper.starts_with("OR ") {
+            result_lines.push(format!("    OR {}", single_spaced[3..].trim()));
+        } else if upper.starts_with("LEFT JOIN ") {
+            result_lines.push(format!("  LEFT JOIN {}", single_spaced[10..].trim()));
+        } else if upper.starts_with("RIGHT JOIN ") {
+            result_lines.push(format!("  RIGHT JOIN {}", single_spaced[11..].trim()));
+        } else if upper.starts_with("INNER JOIN ") {
+            result_lines.push(format!("  INNER JOIN {}", single_spaced[11..].trim()));
+        } else if upper.starts_with("JOIN ") {
+            result_lines.push(format!("  JOIN {}", single_spaced[5..].trim()));
+        } else if upper.starts_with("ON ") {
+            result_lines.push(format!("    ON {}", single_spaced[3..].trim()));
+        } else if upper.starts_with("ORDER BY ") {
+            result_lines.push(format!(" ORDER BY {}", single_spaced[9..].trim()));
+        } else if upper.starts_with("GROUP BY ") {
+            result_lines.push(format!(" GROUP BY {}", single_spaced[9..].trim()));
+        } else if upper.starts_with("HAVING ") {
+            result_lines.push(format!(" HAVING {}", single_spaced[7..].trim()));
         } else {
-            result_lines.push(format!("  {}", l));
+            result_lines.push(single_spaced);
         }
     }
 
-    let out = result_lines.join("\n");
-    if out.is_empty() {
-        trimmed.to_string()
-    } else {
-        out
-    }
+    result_lines.join("\n")
 }
 
 /// Detects bind variables (:name, :1) in SQL and generates candidate extraction SELECT query
@@ -777,5 +803,22 @@ pub fn analyze_query_structure(sql: &str) -> QueryStructure {
         ctes,
         tables,
         filters,
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_sql_idempotent() {
+        let sql = "SELECT banner FROM v$version;";
+        let f1 = format_sql(sql);
+        let f2 = format_sql(&f1);
+        let f3 = format_sql(&f2);
+        assert_eq!(f1, f2);
+        assert_eq!(f2, f3);
+        assert_eq!(f1, "SELECT banner\n  FROM v$version;");
     }
 }
