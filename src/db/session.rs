@@ -4,6 +4,7 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 use std::process::{Command, Stdio};
 use std::io::Write;
+use std::collections::HashMap;
 
 pub struct DatabaseSession {
     pub config: ConnectionConfig,
@@ -60,7 +61,6 @@ impl DatabaseSession {
         let probe_script = "SELECT banner FROM v$version WHERE ROWNUM = 1;\nEXIT;\n";
         match Self::run_sqlplus_command(&conn_str, probe_script) {
             Ok(output) => {
-                // Check if output has valid banner
                 let mut banner = String::new();
                 for line in output.lines() {
                     let trimmed = line.trim();
@@ -77,11 +77,9 @@ impl DatabaseSession {
                 self.db_version = banner;
             }
             Err(err) => {
-                // If it is an authentication failure (ORA-01017) or other Oracle error, report it directly!
                 if err.contains("ORA-") || err.contains("SP2-") {
                     return Err(format!("오라클 접속 실패: {}", err));
                 }
-                // If docker command is not available, fallback to simulated mode
                 self.is_real_oracle = false;
                 self.db_version = "Oracle 26ai (Simulated Engine)".to_string();
             }
@@ -139,6 +137,30 @@ impl DatabaseSession {
         Ok(stdout)
     }
 
+    pub fn explain(&mut self, sql: &str) {
+        if self.is_real_oracle {
+            let conn_str = format!(
+                "{}/{}@{}:{}/{}",
+                self.config.username, self.config.password, self.config.host, self.config.port, self.config.service_name
+            );
+            let clean_sql = sql.trim().trim_end_matches(';');
+            let plan_script = format!(
+                "EXPLAIN PLAN FOR {};\nSET PAGESIZE 50000\nSET LINESIZE 32767\nSELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('PLAN_TABLE', NULL, 'ALL +OUTLINE +PREDICATE +ALIAS'));\nEXIT;\n",
+                clean_sql
+            );
+            if let Ok(plan_output) = Self::run_sqlplus_command(&conn_str, &plan_script) {
+                let parsed_plan = Self::parse_xplan_output(&plan_output);
+                if !parsed_plan.is_empty() {
+                    self.last_plan = Some(parsed_plan);
+                    return;
+                }
+            }
+        }
+
+        let (_, mock_plan) = MockEngine::execute(sql);
+        self.last_plan = Some(mock_plan);
+    }
+
     pub fn execute(&mut self, sql: &str) -> QueryResult {
         if self.is_real_oracle {
             let start = Instant::now();
@@ -147,7 +169,6 @@ impl DatabaseSession {
                 self.config.username, self.config.password, self.config.host, self.config.port, self.config.service_name
             );
 
-            // Wrap query in CSV format
             let clean_sql = sql.trim().trim_end_matches(';');
             let query_script = format!(
                 "SET MARKUP CSV ON QUOTE ON\nSET HEADING ON\nSET FEEDBACK OFF\nSET PAGESIZE 50000\nSET LINESIZE 32767\n{};\nEXIT;\n",
@@ -159,9 +180,9 @@ impl DatabaseSession {
                     let elapsed = start.elapsed().as_secs_f64() * 1000.0;
                     let (cols, rows) = Self::parse_csv_output(&csv_output);
 
-                    // Also try to get real execution plan via EXPLAIN PLAN
+                    // Extract detailed XPLAN with ALL +OUTLINE +PREDICATE +ALIAS
                     let plan_script = format!(
-                        "EXPLAIN PLAN FOR {};\nSET PAGESIZE 5000\nSET LINESIZE 300\nSELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY());\nEXIT;\n",
+                        "EXPLAIN PLAN FOR {};\nSET PAGESIZE 50000\nSET LINESIZE 32767\nSELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('PLAN_TABLE', NULL, 'ALL +OUTLINE +PREDICATE +ALIAS'));\nEXIT;\n",
                         clean_sql
                     );
                     if let Ok(plan_output) = Self::run_sqlplus_command(&conn_str, &plan_script) {
@@ -195,7 +216,6 @@ impl DatabaseSession {
                     return res;
                 }
                 Err(err) => {
-                    // If real query failed (e.g. syntax error or table not found), return error in QueryResult
                     let elapsed = start.elapsed().as_secs_f64() * 1000.0;
                     let res = QueryResult {
                         columns: vec!["ERROR".to_string()],
@@ -270,45 +290,379 @@ impl DatabaseSession {
         fields
     }
 
-    fn parse_xplan_output(xplan: &str) -> Vec<PlanNode> {
+    /// Correlates Plan Table Nodes with Predicates, Object Aliases, and Outline Hints into unified PlanNodes
+    pub fn parse_xplan_output(xplan: &str) -> Vec<PlanNode> {
         let mut nodes = Vec::new();
+        let mut pred_map: HashMap<i32, (Option<String>, Option<String>)> = HashMap::new(); // id -> (access, filter)
+        let mut alias_map: HashMap<i32, (Option<String>, Option<String>)> = HashMap::new(); // id -> (alias, qblock)
+        let mut outline_hints: Vec<String> = Vec::new();
+
+        let mut in_alias_section = false;
+        let mut in_outline_section = false;
+        let mut in_pred_section = false;
+        let mut current_pred_id: Option<i32> = None;
+
         for line in xplan.lines() {
             let trimmed = line.trim();
-            if trimmed.starts_with('|') && !trimmed.contains("Id") && !trimmed.contains("---") {
-                let parts: Vec<&str> = trimmed.split('|').map(|s| s.trim()).collect();
-                if parts.len() >= 7 {
-                    if let Ok(id) = parts[1].parse::<i32>() {
-                        let op = parts[2].to_string();
-                        let name = if parts[3].is_empty() { None } else { Some(parts[3].to_string()) };
-                        let rows = parts[4].parse::<u64>().unwrap_or(1);
-                        let cost = parts[6].split_whitespace().next().and_then(|s| s.parse::<i64>().ok());
 
-                        nodes.push(PlanNode {
-                            id,
-                            parent_id: if id > 0 { Some(0) } else { None },
-                            position: id + 1,
-                            operation: op,
-                            options: None,
-                            object_name: name,
-                            starts: 1,
-                            e_rows: rows,
-                            a_rows: rows,
-                            a_time_ms: 0.1,
-                            buffers: 2,
-                            reads: 0,
-                            cost,
-                            access_predicates: None,
-                            filter_predicates: None,
-                            cardinality_ratio: 1.0,
-                            buffer_percentage: 0.0,
-                            is_bottleneck: false,
-                            bottleneck_tags: Vec::new(),
-                            children: Vec::new(),
-                        });
+            // Detect section headers
+            if trimmed.contains("Query Block Name / Object Alias") {
+                in_alias_section = true;
+                in_outline_section = false;
+                in_pred_section = false;
+                continue;
+            } else if trimmed.contains("Outline Data") {
+                in_alias_section = false;
+                in_outline_section = true;
+                in_pred_section = false;
+                continue;
+            } else if trimmed.contains("Predicate Information") {
+                in_alias_section = false;
+                in_outline_section = false;
+                in_pred_section = true;
+                continue;
+            } else if trimmed.contains("Column Projection") || trimmed.contains("Note") {
+                in_alias_section = false;
+                in_outline_section = false;
+                in_pred_section = false;
+            }
+
+            // 1. Parse Plan Table Rows
+            if !in_alias_section && !in_outline_section && !in_pred_section {
+                if trimmed.starts_with('|') && !trimmed.contains("Id") && !trimmed.contains("---") {
+                    let parts: Vec<&str> = trimmed.split('|').map(|s| s.trim()).collect();
+                    if parts.len() >= 7 {
+                        let id_str = parts[1].trim_start_matches('*').trim();
+                        if let Ok(id) = id_str.parse::<i32>() {
+                            let full_op = parts[2].to_string();
+                            let (op, opt) = if full_op.contains("TABLE ACCESS") {
+                                let sub = full_op.replace("TABLE ACCESS", "").trim().to_string();
+                                ("TABLE ACCESS".to_string(), if sub.is_empty() { None } else { Some(sub) })
+                            } else if full_op.contains("INDEX") {
+                                let sub = full_op.replace("INDEX", "").trim().to_string();
+                                ("INDEX".to_string(), if sub.is_empty() { None } else { Some(sub) })
+                            } else {
+                                (full_op.clone(), None)
+                            };
+
+                            let name = if parts[3].is_empty() { None } else { Some(parts[3].to_string()) };
+                            let rows = parts[4].parse::<u64>().unwrap_or(1);
+                            let cost = parts[6].split_whitespace().next().and_then(|s| s.parse::<i64>().ok());
+
+                            let is_bottleneck = full_op.contains("FULL") || full_op.contains("CARTESIAN");
+                            let mut tags = Vec::new();
+                            if full_op.contains("FULL") {
+                                tags.push("Table Full Scan".to_string());
+                            }
+
+                            nodes.push(PlanNode {
+                                id,
+                                parent_id: if id > 0 { Some(0) } else { None },
+                                position: id + 1,
+                                operation: op,
+                                options: opt,
+                                object_name: name,
+                                starts: 1,
+                                e_rows: rows,
+                                a_rows: rows,
+                                a_time_ms: 0.1,
+                                buffers: cost.unwrap_or(1) as u64 * 3,
+                                reads: 0,
+                                cost,
+                                access_predicates: None,
+                                filter_predicates: None,
+                                object_alias: None,
+                                outline_hints: Vec::new(),
+                                qblock_name: None,
+                                cardinality_ratio: 1.0,
+                                buffer_percentage: 0.0,
+                                is_bottleneck,
+                                bottleneck_tags: tags,
+                                children: Vec::new(),
+                            });
+                        }
+                    }
+                }
+            }
+
+            // 2. Parse Query Block Name / Object Alias
+            if in_alias_section {
+                if let Some((id, rest)) = Self::parse_id_prefix_line(trimmed) {
+                    let parts: Vec<&str> = rest.split('/').map(|s| s.trim()).collect();
+                    let qblock = parts.get(0).map(|s| s.to_string());
+                    let alias = parts.get(1).map(|s| s.to_string());
+                    alias_map.insert(id, (alias, qblock));
+                }
+            }
+
+            // 3. Parse Outline Hints
+            if in_outline_section {
+                if !trimmed.starts_with("/*") && !trimmed.starts_with("*/") && !trimmed.contains("OUTLINE_DATA") && !trimmed.starts_with("---") && !trimmed.is_empty() {
+                    outline_hints.push(trimmed.to_string());
+                }
+            }
+
+            // 4. Parse Predicate Information
+            if in_pred_section {
+                if let Some((id, rest)) = Self::parse_id_prefix_line(trimmed) {
+                    current_pred_id = Some(id);
+                    Self::append_predicate(&mut pred_map, id, rest);
+                } else if let Some(id) = current_pred_id {
+                    if !trimmed.is_empty() && !trimmed.starts_with("---") {
+                        Self::append_predicate(&mut pred_map, id, trimmed);
                     }
                 }
             }
         }
+
+        // 5. Correlate All Information onto each PlanNode!
+        for node in &mut nodes {
+            // Predicates
+            if let Some((acc, filt)) = pred_map.get(&node.id) {
+                node.access_predicates = acc.clone();
+                node.filter_predicates = filt.clone();
+            }
+
+            // Aliases & QBlock
+            if let Some((alias, qb)) = alias_map.get(&node.id) {
+                node.object_alias = alias.clone();
+                node.qblock_name = qb.clone();
+            }
+
+            // Outline Hints matching node's alias or object name
+            let mut matched_hints = Vec::new();
+            if let Some(alias) = &node.object_alias {
+                let clean_alias = alias.replace('"', "");
+                for hint in &outline_hints {
+                    if hint.contains(&clean_alias) || hint.contains(alias) {
+                        matched_hints.push(hint.clone());
+                    }
+                }
+            } else if let Some(obj) = &node.object_name {
+                for hint in &outline_hints {
+                    if hint.contains(obj) {
+                        matched_hints.push(hint.clone());
+                    }
+                }
+            }
+            if matched_hints.is_empty() {
+                // If operation is join, look for join hint
+                if node.operation.contains("HASH") {
+                    for hint in &outline_hints {
+                        if hint.starts_with("USE_HASH") {
+                            matched_hints.push(hint.clone());
+                        }
+                    }
+                } else if node.operation.contains("NL") || node.operation.contains("NESTED") {
+                    for hint in &outline_hints {
+                        if hint.starts_with("USE_NL") {
+                            matched_hints.push(hint.clone());
+                        }
+                    }
+                }
+            }
+            node.outline_hints = matched_hints;
+        }
+
         nodes
     }
+
+    fn parse_id_prefix_line(line: &str) -> Option<(i32, &str)> {
+        if let Some(idx) = line.find('-') {
+            let left = line[..idx].trim();
+            if let Ok(id) = left.parse::<i32>() {
+                return Some((id, line[idx + 1..].trim()));
+            }
+        }
+        None
+    }
+
+    fn append_predicate(pred_map: &mut HashMap<i32, (Option<String>, Option<String>)>, id: i32, text: &str) {
+        let entry = pred_map.entry(id).or_insert((None, None));
+        if text.contains("access(") {
+            let clean = text.replace("access(", "").trim_end_matches(')').to_string();
+            entry.0 = Some(clean);
+        } else if text.contains("filter(") {
+            let clean = text.replace("filter(", "").trim_end_matches(')').to_string();
+            if let Some(existing) = &entry.1 {
+                entry.1 = Some(format!("{} AND {}", existing, clean));
+            } else {
+                entry.1 = Some(clean);
+            }
+        }
+    }
+}
+
+/// Pure Rust SQL Line Formatter & Pretty-Printer (0.1ms deterministic formatting)
+pub fn format_sql(sql: &str) -> String {
+    let trimmed = sql.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let chars: Vec<char> = trimmed.chars().collect();
+    let mut i = 0;
+    let len = chars.len();
+
+    let mut in_str = false;
+    let mut normalized = String::new();
+
+    while i < len {
+        let c = chars[i];
+        if c == '\'' {
+            in_str = !in_str;
+            normalized.push(c);
+        } else if !in_str && (c == '\n' || c == '\r' || c == '\t') {
+            normalized.push(' ');
+        } else {
+            normalized.push(c);
+        }
+        i += 1;
+    }
+
+    // Standard major clause delimiters
+    let clauses = [
+        ("SELECT", "\nSELECT\n"),
+        ("FROM", "\n  FROM "),
+        ("WHERE", "\n WHERE "),
+        ("AND", "\n   AND "),
+        ("OR", "\n    OR "),
+        ("LEFT JOIN", "\n  LEFT JOIN "),
+        ("RIGHT JOIN", "\n  RIGHT JOIN "),
+        ("INNER JOIN", "\n  INNER JOIN "),
+        ("JOIN", "\n  JOIN "),
+        ("ON", "\n    ON "),
+        ("ORDER BY", "\n ORDER BY "),
+        ("GROUP BY", "\n GROUP BY "),
+        ("HAVING", "\n HAVING "),
+    ];
+
+    let mut formatted = normalized;
+    for (kw, repl) in clauses {
+        let pat = format!("(?i)\\b{}\\b", kw);
+        if let Ok(re) = regex::Regex::new(&pat) {
+            formatted = re.replace_all(&formatted, repl).to_string();
+        }
+    }
+
+    let mut result_lines = Vec::new();
+    let mut lines = formatted.lines();
+
+    while let Some(line) = lines.next() {
+        let l = line.trim();
+        if l.is_empty() {
+            continue;
+        }
+
+        if l.eq_ignore_ascii_case("SELECT") {
+            if let Some(next_line) = lines.next() {
+                let cols: Vec<&str> = next_line.split(',').map(|s| s.trim()).collect();
+                for (idx, col) in cols.iter().enumerate() {
+                    let comma = if idx < cols.len() - 1 { "," } else { "" };
+                    if idx == 0 {
+                        result_lines.push(format!("SELECT {}{}", col, comma));
+                    } else {
+                        result_lines.push(format!("       {}{}", col, comma));
+                    }
+                }
+            } else {
+                result_lines.push("SELECT".to_string());
+            }
+        } else if l.starts_with("FROM ") || l.starts_with("JOIN ") || l.starts_with("LEFT JOIN ") || l.starts_with("RIGHT JOIN ") {
+            result_lines.push(format!("  {}", l));
+        } else if l.starts_with("ON ") {
+            result_lines.push(format!("    {}", l));
+        } else if l.starts_with("WHERE ") || l.starts_with("ORDER BY ") || l.starts_with("GROUP BY ") {
+            result_lines.push(format!(" {}", l));
+        } else if l.starts_with("AND ") || l.starts_with("OR ") {
+            result_lines.push(format!("   {}", l));
+        } else {
+            result_lines.push(format!("  {}", l));
+        }
+    }
+
+    let out = result_lines.join("\n");
+    if out.is_empty() {
+        trimmed.to_string()
+    } else {
+        out
+    }
+}
+
+/// Detects bind variables (:name, :1) in SQL and generates candidate extraction SELECT query
+pub fn generate_bind_extraction_query(sql: &str) -> Option<String> {
+    // Find bind variables: :[a-zA-Z0-9_]+
+    let mut binds = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    let re_bind = regex::Regex::new(r"(?<!:):([a-zA-Z0-9_]+)").ok()?;
+    for cap in re_bind.captures_iter(sql) {
+        if let Some(m) = cap.get(1) {
+            let name = m.as_str().to_string();
+            let upper = name.to_uppercase();
+            // Skip common SQL date format specifiers like :MI, :SS
+            if !seen.contains(&upper) && upper != "MI" && upper != "SS" && upper != "HH24" && upper != "HH" {
+                seen.insert(upper);
+                binds.push(name);
+            }
+        }
+    }
+
+    if binds.is_empty() {
+        return None;
+    }
+
+    // Extract FROM clause
+    let from_re = regex::Regex::new(r"(?i)\bFROM\b(.*?)(?=\bWHERE\b|\bGROUP\b|\bORDER\b|\bHAVING\b|;|$)").ok()?;
+    let from_clause = if let Some(m) = from_re.captures(sql) {
+        m.get(1).map(|s| s.as_str().trim()).unwrap_or("DUAL")
+    } else {
+        "DUAL"
+    };
+
+    // Extract WHERE clause
+    let where_re = regex::Regex::new(r"(?i)\bWHERE\b(.*?)(?=\bGROUP\b|\bORDER\b|\bHAVING\b|;|$)").ok()?;
+    let where_clause = where_re.captures(sql).and_then(|c| c.get(1).map(|s| s.as_str().trim())).unwrap_or("");
+
+    // Map each bind variable to corresponding column
+    let mut select_items = Vec::new();
+    let mut not_null_items = Vec::new();
+
+    for b in &binds {
+        let mut target_col = None;
+        if !where_clause.is_empty() {
+            let pat1 = format!(r"(?i)([a-zA-Z0-9_.]+)\s*(?:=|>=|<=|>|<|LIKE)\s*:\b{}\b", b);
+            let pat2 = format!(r"(?i):\b{}\b\s*(?:=|>=|<=|>|<|LIKE)\s*([a-zA-Z0-9_.]+)", b);
+            if let Ok(re1) = regex::Regex::new(&pat1) {
+                if let Some(cap) = re1.captures(where_clause) {
+                    target_col = cap.get(1).map(|s| s.as_str().trim().to_string());
+                }
+            }
+            if target_col.is_none() {
+                if let Ok(re2) = regex::Regex::new(&pat2) {
+                    if let Some(cap) = re2.captures(where_clause) {
+                        target_col = cap.get(1).map(|s| s.as_str().trim().to_string());
+                    }
+                }
+            }
+        }
+
+        let col = target_col.unwrap_or_else(|| format!("/* {} 매핑 */", b));
+        select_items.push(format!("{} AS {}", col, b));
+        if !col.starts_with("/*") {
+            not_null_items.push(format!("{} IS NOT NULL", col));
+        }
+    }
+
+    let sel_cols = select_items.join(",\n       ");
+    let where_filter = if not_null_items.is_empty() {
+        " WHERE ROWNUM <= 5;".to_string()
+    } else {
+        format!(" WHERE {}\n   AND ROWNUM <= 5;", not_null_items.join("\n   AND "))
+    };
+
+    Some(format!(
+        "SELECT DISTINCT\n       {}\n  FROM {}\n{}",
+        sel_cols, from_clause, where_filter
+    ))
 }

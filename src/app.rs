@@ -132,6 +132,15 @@ impl eframe::App for FlipsyApp {
  WHERE I.CENTER_CD = 'HUB_01'
    AND M.MOVE_STATUS = 'READY';"#.to_string(),
                             },
+                            SampleQuery {
+                                title: "6. 바인드 & XPlan 결합 분석".to_string(),
+                                description: "EMP+DEPT 바인드 변수(:B_SAL, :B_LOC) 추출 및 XPlan Outline/Predicate 분석".to_string(),
+                                sql: r#"SELECT e.empno, e.ename, e.sal, d.dname, d.loc
+  FROM emp e
+  JOIN dept d ON e.deptno = d.deptno
+ WHERE e.sal > :B_SAL
+   AND d.loc = :B_LOC;"#.to_string(),
+                            },
                         ];
 
                         let mut editor = EditorView::new();
@@ -275,12 +284,16 @@ impl eframe::App for FlipsyApp {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::none().fill(Color32::from_rgb(248, 249, 250)).inner_margin(egui::Margin::same(12.0)))
                     .show(ctx, |ui| {
-                        let (ed_run, ed_explain) = editor.show(ui);
-                        if ed_run {
+                        let action = editor.show(ui);
+                        if action.run_requested {
                             run_requested = true;
                         }
-                        if ed_explain {
+                        if action.explain_requested {
                             explain_requested = true;
+                        }
+                        if let Some(custom_sql) = action.execute_custom_sql {
+                            session.execute(&custom_sql);
+                            *active_bottom_tab = BottomTab::Grid;
                         }
 
                         ui.add_space(10.0);
@@ -343,7 +356,7 @@ impl eframe::App for FlipsyApp {
                 }
 
                 if explain_requested {
-                    session.execute(&editor.sql);
+                    session.explain(&editor.sql);
                     *active_bottom_tab = BottomTab::PlanTree;
                 }
 

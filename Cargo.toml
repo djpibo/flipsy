@@ -8,6 +8,7 @@ description = "Ultra-lightweight Pure Rust Oracle Client & XPlan Visualizer"
 eframe = "0.29"
 egui = "0.29"
 serde = { version = "1", features = ["derive"] }
+regex = "1"
 
 [profile.release]
 opt-level = 3

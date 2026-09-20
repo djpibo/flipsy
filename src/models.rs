@@ -40,11 +40,44 @@ pub struct PlanNode {
     pub cost: Option<i64>,
     pub access_predicates: Option<String>,
     pub filter_predicates: Option<String>,
+    pub object_alias: Option<String>,
+    pub outline_hints: Vec<String>,
+    pub qblock_name: Option<String>,
     pub cardinality_ratio: f64,
     pub buffer_percentage: f64,
     pub is_bottleneck: bool,
     pub bottleneck_tags: Vec<String>,
     pub children: Vec<PlanNode>,
+}
+
+impl Default for PlanNode {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            parent_id: None,
+            position: 0,
+            operation: String::new(),
+            options: None,
+            object_name: None,
+            starts: 1,
+            e_rows: 1,
+            a_rows: 1,
+            a_time_ms: 0.0,
+            buffers: 0,
+            reads: 0,
+            cost: None,
+            access_predicates: None,
+            filter_predicates: None,
+            object_alias: None,
+            outline_hints: Vec::new(),
+            qblock_name: None,
+            cardinality_ratio: 1.0,
+            buffer_percentage: 0.0,
+            is_bottleneck: false,
+            bottleneck_tags: Vec::new(),
+            children: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

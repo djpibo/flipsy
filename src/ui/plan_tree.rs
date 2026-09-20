@@ -163,6 +163,14 @@ impl PlanTreeView {
                                     .monospace(),
                             );
                         }
+                        if let Some(alias) = &node.object_alias {
+                            ui.label(
+                                RichText::new(format!("@{}", alias))
+                                    .size(10.5)
+                                    .color(Color32::from_rgb(140, 140, 150))
+                                    .monospace(),
+                            );
+                        }
                         if node.is_bottleneck {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 egui::Frame::none()
@@ -282,24 +290,65 @@ impl PlanTreeView {
                         });
                     }
 
-                    // Predicates display
+                    // Correlated Predicates (Access & Filter)
                     if node.access_predicates.is_some() || node.filter_predicates.is_some() {
-                        ui.add_space(2.0);
-                        ui.horizontal(|ui| {
-                            if let Some(access) = &node.access_predicates {
+                        ui.add_space(4.0);
+                        if let Some(access) = &node.access_predicates {
+                            ui.horizontal_wrapped(|ui| {
+                                egui::Frame::none()
+                                    .fill(if node.is_bottleneck { Color32::from_rgb(20, 45, 55) } else { Color32::from_rgb(236, 254, 255) })
+                                    .rounding(Rounding::same(3.0))
+                                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(6, 182, 212)))
+                                    .inner_margin(egui::Margin::symmetric(5.0, 1.5))
+                                    .show(ui, |ui| {
+                                        ui.label(RichText::new("ACCESS").size(9.5).strong().color(Color32::from_rgb(8, 145, 178)));
+                                    });
                                 ui.label(
-                                    RichText::new(format!("access: {}", access))
-                                        .size(10.0)
-                                        .color(text_secondary)
-                                        .monospace(),
+                                    RichText::new(access)
+                                        .size(10.5)
+                                        .monospace()
+                                        .color(if node.is_bottleneck { Color32::from_rgb(207, 250, 254) } else { Color32::from_rgb(15, 23, 42) }),
                                 );
-                            }
-                            if let Some(filter) = &node.filter_predicates {
+                            });
+                        }
+                        if let Some(filter) = &node.filter_predicates {
+                            ui.horizontal_wrapped(|ui| {
+                                egui::Frame::none()
+                                    .fill(if node.is_bottleneck { Color32::from_rgb(55, 40, 15) } else { Color32::from_rgb(254, 252, 232) })
+                                    .rounding(Rounding::same(3.0))
+                                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(234, 179, 8)))
+                                    .inner_margin(egui::Margin::symmetric(5.0, 1.5))
+                                    .show(ui, |ui| {
+                                        ui.label(RichText::new("FILTER").size(9.5).strong().color(Color32::from_rgb(202, 138, 4)));
+                                    });
                                 ui.label(
-                                    RichText::new(format!("filter: {}", filter))
+                                    RichText::new(filter)
+                                        .size(10.5)
+                                        .monospace()
+                                        .color(if node.is_bottleneck { Color32::from_rgb(254, 243, 199) } else { Color32::from_rgb(15, 23, 42) }),
+                                );
+                            });
+                        }
+                    }
+
+                    // Correlated Outline Hints
+                    if !node.outline_hints.is_empty() {
+                        ui.add_space(3.0);
+                        ui.horizontal_wrapped(|ui| {
+                            egui::Frame::none()
+                                .fill(if node.is_bottleneck { Color32::from_rgb(45, 25, 60) } else { Color32::from_rgb(245, 243, 255) })
+                                .rounding(Rounding::same(3.0))
+                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(168, 85, 247)))
+                                .inner_margin(egui::Margin::symmetric(5.0, 1.5))
+                                .show(ui, |ui| {
+                                    ui.label(RichText::new("OUTLINE").size(9.5).strong().color(Color32::from_rgb(147, 51, 234)));
+                                });
+                            for hint in &node.outline_hints {
+                                ui.label(
+                                    RichText::new(hint)
                                         .size(10.0)
-                                        .color(text_secondary)
-                                        .monospace(),
+                                        .monospace()
+                                        .color(if node.is_bottleneck { Color32::from_rgb(233, 213, 255) } else { Color32::from_rgb(88, 28, 135) }),
                                 );
                             }
                         });
