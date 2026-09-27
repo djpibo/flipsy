@@ -26,9 +26,9 @@ pub fn create_f_icon() -> eframe::egui::IconData {
                 let mut b = 27u8;
                 let a = 255u8;
 
-                let in_spine = x >= 9 && x <= 13 && y >= 7 && y <= 24;
-                let in_top = x >= 9 && x <= 23 && y >= 7 && y <= 10;
-                let in_mid = x >= 9 && x <= 19 && y >= 14 && y <= 17;
+                let in_spine = (9..=13).contains(&x) && (7..=24).contains(&y);
+                let in_top = (9..=23).contains(&x) && (7..=10).contains(&y);
+                let in_mid = (9..=19).contains(&x) && (14..=17).contains(&y);
 
                 if in_spine || in_top || in_mid {
                     r = 255;

@@ -6,6 +6,7 @@ use crate::ui::grid::GridView;
 use crate::ui::plan_tree::PlanTreeView;
 use crate::ui::server_list::ServerListView;
 
+#[allow(clippy::large_enum_variant)]
 pub enum AppState {
     ServerList(ServerListView),
     Workspace {

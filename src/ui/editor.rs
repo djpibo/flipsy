@@ -272,7 +272,7 @@ impl EditorView {
                 if structure.tables.is_empty() {
                     ui.label(RichText::new("참조된 테이블이 없습니다.").size(11.0).color(Color32::from_rgb(161, 161, 170)));
                 } else {
-                    for (_idx, tbl) in structure.tables.iter().enumerate() {
+                    for tbl in &structure.tables {
                         egui::Frame::none()
                             .fill(Color32::from_rgb(250, 250, 252))
                             .rounding(Rounding::same(4.0))

@@ -11,7 +11,7 @@ fn format_num(n: u64) -> String {
     for (i, &c) in chars.iter().enumerate() {
         out.push(c);
         let rem = len - 1 - i;
-        if rem > 0 && rem % 3 == 0 {
+        if rem > 0 && rem.is_multiple_of(3) {
             out.push(',');
         }
     }

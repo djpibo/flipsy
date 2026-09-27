@@ -311,11 +311,11 @@ impl MockEngine {
         let mut children_map: HashMap<i32, Vec<PlanNode>> = HashMap::new();
         let mut root_nodes: Vec<PlanNode> = Vec::new();
 
-        nodes.sort_by(|a, b| b.id.cmp(&a.id));
+        nodes.sort_by_key(|a| std::cmp::Reverse(a.id));
 
         for mut node in nodes {
             if let Some(mut children) = children_map.remove(&node.id) {
-                children.sort_by(|a, b| a.position.cmp(&b.position));
+                children.sort_by_key(|a| a.position);
                 node.children = children;
             }
 
@@ -326,7 +326,7 @@ impl MockEngine {
             }
         }
 
-        root_nodes.sort_by(|a, b| a.id.cmp(&b.id));
+        root_nodes.sort_by_key(|a| a.id);
         root_nodes
     }
 }
