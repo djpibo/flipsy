@@ -110,8 +110,8 @@ impl GridView {
                                 );
                             }
 
-                            // Pagination Controls (Right-Aligned)
-                            if total_pages > 1 || total_rows > 50 {
+                            // Pagination Controls (Right-Aligned) - Always visible when rows exist
+                            if total_rows > 0 {
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     let is_last = self.current_page >= total_pages;
                                     let is_first = self.current_page <= 1;
@@ -139,8 +139,8 @@ impl GridView {
 
                                     ui.add_space(14.0);
 
-                                    // Page size toggle buttons
-                                    for &size in &[500, 200, 100, 50] {
+                                    // Page size toggle buttons: includes smaller sizes [500, 200, 100, 50, 20, 10]
+                                    for &size in &[500, 200, 100, 50, 20, 10] {
                                         let selected = self.page_size == size;
                                         let text_col = if selected { Color32::WHITE } else { Color32::from_rgb(82, 82, 91) };
                                         let btn = egui::Button::new(RichText::new(format!("{}", size)).size(10.0).color(text_col))
