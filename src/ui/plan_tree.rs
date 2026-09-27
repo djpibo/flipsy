@@ -1,4 +1,4 @@
-use eframe::egui::{self, Color32, Rect, RichText, Rounding, Stroke, Vec2};
+use eframe::egui::{self, Color32, RichText, Rounding, Stroke, Vec2};
 use crate::models::PlanNode;
 
 pub struct PlanTreeView;
@@ -34,149 +34,84 @@ impl PlanTreeView {
                 let total_time = root.a_time_ms;
                 let total_cost = root.cost.or_else(|| nodes.iter().filter_map(|n| n.cost).max());
 
-                // KPI Header (Light Monochrome)
+                // 1. KPI Summary Header (Light Minimalist Toolbar)
                 egui::Frame::none()
                     .fill(Color32::WHITE)
-                    .rounding(Rounding::same(6.0))
+                    .rounding(Rounding::same(4.0))
                     .stroke(Stroke::new(1.0_f32, Color32::from_rgb(228, 228, 231)))
-                    .inner_margin(egui::Margin::same(12.0))
+                    .inner_margin(egui::Margin::symmetric(12.0, 8.0))
                     .show(ui, |ui| {
-                        ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
                             // Method Subtitle Badge
-                            ui.horizontal(|ui| {
-                                let (badge_title, badge_color, badge_bg) = if is_runtime {
-                                    (
-                                        "2번 방식: DBMS.XPLAN (ALLSTATS LAST 실제 런타임 실행 통계)",
-                                        Color32::from_rgb(22, 163, 74),
-                                        Color32::from_rgb(240, 253, 244),
-                                    )
-                                } else {
-                                    (
-                                        "1번 방식: EXPLAIN PLAN FOR (옵티마이저 예측 실행계획)",
-                                        Color32::from_rgb(37, 99, 235),
-                                        Color32::from_rgb(239, 246, 255),
-                                    )
-                                };
+                            let (badge_title, badge_color, badge_bg) = if is_runtime {
+                                (
+                                    "2번 방식: DBMS.XPLAN (ALLSTATS LAST 런타임 실측치)",
+                                    Color32::from_rgb(22, 163, 74),
+                                    Color32::from_rgb(240, 253, 244),
+                                )
+                            } else {
+                                (
+                                    "1번 방식: EXPLAIN PLAN FOR (옵티마이저 예측 계획)",
+                                    Color32::from_rgb(37, 99, 235),
+                                    Color32::from_rgb(239, 246, 255),
+                                )
+                            };
 
-                                egui::Frame::none()
-                                    .fill(badge_bg)
-                                    .rounding(Rounding::same(4.0))
-                                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(228, 228, 231)))
-                                    .inner_margin(egui::Margin::symmetric(8.0, 3.0))
-                                    .show(ui, |ui| {
-                                        ui.label(RichText::new(badge_title).size(11.0).strong().color(badge_color));
-                                    });
-                            });
-
-                            ui.add_space(8.0);
-
-                            // Metrics Row
-                            ui.horizontal(|ui| {
-                                if is_runtime {
-                                    // 1. A-Time
-                                    ui.vertical(|ui| {
-                                        ui.label(RichText::new("A-Time").size(11.0).color(Color32::from_rgb(113, 113, 122)));
-                                        ui.label(RichText::new(format!("{:.2} ms", total_time)).size(15.0).strong().monospace().color(Color32::from_rgb(24, 24, 27)));
-                                    });
-
-                                    ui.add_space(28.0);
-
-                                    // 2. Buffers
-                                    ui.vertical(|ui| {
-                                        ui.label(RichText::new("Buffers").size(11.0).color(Color32::from_rgb(113, 113, 122)));
-                                        ui.label(RichText::new(format_num(total_buffers)).size(15.0).strong().monospace().color(Color32::from_rgb(24, 24, 27)));
-                                    });
-
-                                    ui.add_space(28.0);
-
-                                    // 3. Reads
-                                    ui.vertical(|ui| {
-                                        ui.label(RichText::new("Reads").size(11.0).color(Color32::from_rgb(113, 113, 122)));
-                                        ui.label(RichText::new(format_num(total_reads)).size(15.0).strong().monospace().color(Color32::from_rgb(24, 24, 27)));
-                                    });
-                                } else {
-                                    // 1. Cost (Primary for Explain)
-                                    ui.vertical(|ui| {
-                                        ui.label(RichText::new("Cost").size(11.0).color(Color32::from_rgb(113, 113, 122)));
-                                        let cost_str = total_cost.map(|c| format_num(c.max(0) as u64)).unwrap_or_else(|| "-".to_string());
-                                        ui.label(RichText::new(cost_str).size(15.0).strong().monospace().color(Color32::from_rgb(24, 24, 27)));
-                                    });
-
-                                    ui.add_space(28.0);
-
-                                    // 2. Rows (Est.)
-                                    ui.vertical(|ui| {
-                                        ui.label(RichText::new("Rows (Est.)").size(11.0).color(Color32::from_rgb(113, 113, 122)));
-                                        ui.label(RichText::new(format_num(root.e_rows)).size(15.0).strong().monospace().color(Color32::from_rgb(24, 24, 27)));
-                                    });
-
-                                    ui.add_space(28.0);
-
-                                    // 3. A-Time
-                                    ui.vertical(|ui| {
-                                        ui.label(RichText::new("A-Time").size(11.0).color(Color32::from_rgb(113, 113, 122)));
-                                        ui.label(RichText::new("- (미실행)").size(14.0).color(Color32::from_rgb(161, 161, 170)));
-                                    });
-                                }
-
-                                ui.add_space(28.0);
-
-                                if is_runtime {
-                                    // 4. Cost
-                                    ui.vertical(|ui| {
-                                        ui.label(RichText::new("Cost").size(11.0).color(Color32::from_rgb(113, 113, 122)));
-                                        let cost_str = total_cost.map(|c| format_num(c.max(0) as u64)).unwrap_or_else(|| "-".to_string());
-                                        ui.label(RichText::new(cost_str).size(15.0).strong().monospace().color(Color32::from_rgb(24, 24, 27)));
-                                    });
-
-                                    ui.add_space(28.0);
-                                }
-
-                                // 5. SQL_ID
-                                ui.vertical(|ui| {
-                                    ui.label(RichText::new("SQL_ID").size(11.0).color(Color32::from_rgb(113, 113, 122)));
-                                    let s_id = sql_id.unwrap_or("-");
-                                    ui.label(
-                                        RichText::new(s_id)
-                                            .size(14.0)
-                                            .strong()
-                                            .monospace()
-                                            .color(Color32::from_rgb(79, 70, 229)),
-                                    );
+                            egui::Frame::none()
+                                .fill(badge_bg)
+                                .rounding(Rounding::same(3.0))
+                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(228, 228, 231)))
+                                .inner_margin(egui::Margin::symmetric(8.0, 3.0))
+                                .show(ui, |ui| {
+                                    ui.label(RichText::new(badge_title).size(10.5).strong().color(badge_color));
                                 });
 
-                                ui.add_space(28.0);
+                            ui.add_space(16.0);
 
-                                // 6. Plan Hash
-                                ui.vertical(|ui| {
-                                    ui.label(RichText::new("Plan Hash").size(11.0).color(Color32::from_rgb(113, 113, 122)));
-                                    let p_hash = plan_hash.map(|h| h.to_string()).unwrap_or_else(|| "-".to_string());
-                                    ui.label(
-                                        RichText::new(p_hash)
-                                            .size(14.0)
-                                            .strong()
-                                            .monospace()
-                                            .color(Color32::from_rgb(24, 24, 27)),
-                                    );
-                                });
-                            });
+                            // Metrics
+                            if is_runtime {
+                                ui.label(RichText::new("A-Time:").size(11.0).color(Color32::from_rgb(100, 116, 139)));
+                                ui.label(RichText::new(format!("{:.2} ms", total_time)).size(12.0).strong().monospace().color(Color32::from_rgb(15, 23, 42)));
+                                ui.add_space(12.0);
+
+                                ui.label(RichText::new("Buffers:").size(11.0).color(Color32::from_rgb(100, 116, 139)));
+                                ui.label(RichText::new(format_num(total_buffers)).size(12.0).strong().monospace().color(Color32::from_rgb(15, 23, 42)));
+                                ui.add_space(12.0);
+
+                                ui.label(RichText::new("Reads:").size(11.0).color(Color32::from_rgb(100, 116, 139)));
+                                ui.label(RichText::new(format_num(total_reads)).size(12.0).strong().monospace().color(Color32::from_rgb(15, 23, 42)));
+                                ui.add_space(12.0);
+                            }
+
+                            let cost_str = total_cost.map(|c| format_num(c.max(0) as u64)).unwrap_or_else(|| "-".to_string());
+                            ui.label(RichText::new("Cost:").size(11.0).color(Color32::from_rgb(100, 116, 139)));
+                            ui.label(RichText::new(cost_str).size(12.0).strong().monospace().color(Color32::from_rgb(15, 23, 42)));
+                            ui.add_space(12.0);
+
+                            ui.label(RichText::new("SQL_ID:").size(11.0).color(Color32::from_rgb(100, 116, 139)));
+                            ui.label(RichText::new(sql_id.unwrap_or("-")).size(12.0).strong().monospace().color(Color32::from_rgb(79, 70, 229)));
+                            ui.add_space(12.0);
+
+                            ui.label(RichText::new("Plan Hash:").size(11.0).color(Color32::from_rgb(100, 116, 139)));
+                            let p_hash = plan_hash.map(|h| h.to_string()).unwrap_or_else(|| "-".to_string());
+                            ui.label(RichText::new(p_hash).size(12.0).strong().monospace().color(Color32::from_rgb(15, 23, 42)));
                         });
                     });
 
                 ui.add_space(6.0);
 
-                // Tree Nodes in Scroll Area
+                // 2. Single Pane ("한 판") Execution Tree View
                 egui::Frame::none()
                     .fill(Color32::WHITE)
-                    .rounding(Rounding::same(6.0))
+                    .rounding(Rounding::same(4.0))
                     .stroke(Stroke::new(1.0_f32, Color32::from_rgb(228, 228, 231)))
-                    .inner_margin(egui::Margin::same(12.0))
+                    .inner_margin(egui::Margin::symmetric(10.0, 8.0))
                     .show(ui, |ui| {
                         egui::ScrollArea::both()
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
-                                for node in nodes {
-                                    Self::render_node(ui, node, 0, is_runtime);
+                                for (idx, node) in nodes.iter().enumerate() {
+                                    Self::render_unified_row(ui, node, 0, is_runtime, idx % 2 == 0);
                                 }
                             });
                     });
@@ -184,7 +119,7 @@ impl PlanTreeView {
             _ => {
                 egui::Frame::none()
                     .fill(Color32::WHITE)
-                    .rounding(Rounding::same(6.0))
+                    .rounding(Rounding::same(4.0))
                     .stroke(Stroke::new(1.0_f32, Color32::from_rgb(228, 228, 231)))
                     .inner_margin(egui::Margin::same(40.0))
                     .show(ui, |ui| {
@@ -194,26 +129,26 @@ impl PlanTreeView {
                                     RichText::new("2번 방식: DBMS.XPLAN (실행 통계) 데이터가 없습니다.")
                                         .color(Color32::from_rgb(24, 24, 27))
                                         .strong()
-                                        .size(14.0),
+                                        .size(13.5),
                                 );
                                 ui.add_space(4.0);
                                 ui.label(
                                     RichText::new("상단의 [▶ Run (Ctrl+Enter)] 버튼을 누르면 쿼리 실행 후 실제 ALLSTATS LAST 런타임 통계가 수집됩니다.")
                                         .color(Color32::from_rgb(113, 113, 122))
-                                        .size(12.0),
+                                        .size(11.5),
                                 );
                             } else {
                                 ui.label(
                                     RichText::new("1번 방식: EXPLAIN PLAN FOR (예측 계획) 데이터가 없습니다.")
                                         .color(Color32::from_rgb(24, 24, 27))
                                         .strong()
-                                        .size(14.0),
+                                        .size(13.5),
                                 );
                                 ui.add_space(4.0);
                                 ui.label(
                                     RichText::new("상단의 [⚡ Explain (F10)] 버튼 또는 F10 키를 누르면 쿼리를 직접 실행하지 않고 옵티마이저 예측 경로를 생성합니다.")
                                         .color(Color32::from_rgb(113, 113, 122))
-                                        .size(12.0),
+                                        .size(11.5),
                                 );
                             }
                         });
@@ -222,308 +157,195 @@ impl PlanTreeView {
         }
     }
 
-    fn render_node(ui: &mut egui::Ui, node: &PlanNode, depth: usize, is_runtime: bool) {
-        let is_skew = node.cardinality_ratio >= 10.0;
-        let is_heavy_starts = node.starts >= 1000;
-        let is_heavy_buffers = node.buffer_percentage >= 30.0;
-
-        let (card_bg, stroke_color, text_primary, text_secondary) = if node.is_bottleneck {
-            (
-                Color32::from_rgb(24, 24, 27),
-                Color32::from_rgb(0, 0, 0),
-                Color32::WHITE,
-                Color32::from_rgb(212, 212, 216),
-            )
+    fn render_unified_row(
+        ui: &mut egui::Ui,
+        node: &PlanNode,
+        depth: usize,
+        is_runtime: bool,
+        is_even: bool,
+    ) {
+        let row_bg = if is_even {
+            Color32::from_rgb(253, 253, 254)
         } else {
-            (
-                Color32::from_rgb(250, 250, 252),
-                Color32::from_rgb(228, 228, 231),
-                Color32::from_rgb(24, 24, 27),
-                Color32::from_rgb(113, 113, 122),
-            )
+            Color32::WHITE
         };
 
-        ui.horizontal(|ui| {
-            if depth > 0 {
-                ui.add_space((depth as f32) * 22.0);
-                ui.label(RichText::new("└ ").monospace().color(Color32::from_rgb(161, 161, 170)));
-            }
-
-            egui::Frame::none()
-                .fill(card_bg)
-                .rounding(Rounding::same(6.0))
-                .stroke(Stroke::new(1.0_f32, stroke_color))
-                .inner_margin(egui::Margin::symmetric(12.0, 8.0))
-                .show(ui, |ui| {
-                    ui.vertical(|ui| {
-                        ui.set_min_width(540.0);
-
-                        // Header line: Id, Operation, Object Name, Bottleneck Tag
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(format!("Id {}", node.id))
-                                    .size(11.0)
-                                    .color(text_secondary)
-                                    .strong()
-                                    .monospace(),
-                            );
-                            ui.label(
-                                RichText::new(format!("{} {}", node.operation, node.options.as_deref().unwrap_or("")))
-                                    .size(13.0)
-                                    .color(text_primary)
-                                    .strong(),
-                            );
-                            if let Some(obj) = &node.object_name {
+        egui::Frame::none()
+            .fill(row_bg)
+            .inner_margin(egui::Margin::symmetric(6.0, 4.0))
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    // Line 1: Operation Line (Id + Tree Symbol + Operation + Object + Alias + Cost)
+                    ui.horizontal(|ui| {
+                        // Id column (fixed width)
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(32.0, 18.0),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
                                 ui.label(
-                                    RichText::new(format!("({})", obj))
-                                        .size(11.0)
-                                        .color(text_secondary)
-                                        .monospace(),
-                                );
-                            }
-                            if let Some(alias) = &node.object_alias {
-                                ui.label(
-                                    RichText::new(format!("@{}", alias))
-                                        .size(10.5)
-                                        .color(Color32::from_rgb(140, 140, 150))
-                                        .monospace(),
-                                );
-                            }
-                            if node.is_bottleneck {
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    egui::Frame::none()
-                                        .fill(Color32::from_rgb(63, 63, 70))
-                                        .rounding(Rounding::same(4.0))
-                                        .inner_margin(egui::Margin::symmetric(8.0, 3.0))
-                                        .show(ui, |ui| {
-                                            ui.label(
-                                                RichText::new("[!] BOTTLENECK")
-                                                    .size(11.0)
-                                                    .color(Color32::WHITE)
-                                                    .strong(),
-                                            );
-                                        });
-                                });
-                            }
-                        });
-
-                        ui.add_space(4.0);
-
-                        // Metrics row
-                        ui.horizontal(|ui| {
-                            if is_runtime {
-                                // Starts
-                                ui.label(RichText::new("Starts:").size(10.0).color(text_secondary));
-                                ui.label(
-                                    RichText::new(format_num(node.starts))
-                                        .size(11.0)
-                                        .color(if is_heavy_starts && !node.is_bottleneck { Color32::from_rgb(24, 24, 27) } else { text_primary })
+                                    RichText::new(format!("{:>2}", node.id))
+                                        .size(11.5)
                                         .strong()
-                                        .monospace(),
-                                );
-
-                                ui.add_space(14.0);
-
-                                // E-Rows -> A-Rows
-                                ui.label(RichText::new("E-Rows -> A-Rows:").size(10.0).color(text_secondary));
-                                ui.label(
-                                    RichText::new(format!("{} -> {}", format_num(node.e_rows), format_num(node.a_rows)))
-                                        .size(11.0)
-                                        .color(text_primary)
-                                        .strong()
-                                        .monospace(),
-                                );
-                                if is_skew {
-                                    ui.label(
-                                        RichText::new(format!("({:.0}x Skew)", node.cardinality_ratio))
-                                            .size(10.0)
-                                            .color(if node.is_bottleneck { Color32::WHITE } else { Color32::from_rgb(82, 82, 91) })
-                                            .strong(),
-                                    );
-                                }
-
-                                ui.add_space(14.0);
-
-                                // Buffers
-                                ui.label(RichText::new("Buffers:").size(10.0).color(text_secondary));
-                                ui.label(
-                                    RichText::new(format!("{} ({:.1}%)", format_num(node.buffers), node.buffer_percentage))
-                                        .size(11.0)
-                                        .color(text_primary)
-                                        .strong()
-                                        .monospace(),
-                                );
-
-                                if let Some(c) = node.cost {
-                                    ui.add_space(14.0);
-                                    ui.label(RichText::new("Cost:").size(10.0).color(text_secondary));
-                                    ui.label(
-                                        RichText::new(format_num(c.max(0) as u64))
-                                            .size(11.0)
-                                            .color(text_primary)
-                                            .strong()
-                                            .monospace(),
-                                    );
-                                }
-
-                                ui.add_space(14.0);
-                                ui.label(
-                                    RichText::new(format!("A-Time: {:.2}ms", node.a_time_ms))
-                                        .size(10.0)
-                                        .color(text_secondary),
-                                );
-                            } else {
-                                // 1번 방식: EXPLAIN PLAN FOR (예측 계획)
-                                ui.label(RichText::new("Rows (Est):").size(10.0).color(text_secondary));
-                                ui.label(
-                                    RichText::new(format_num(node.e_rows))
-                                        .size(11.0)
-                                        .color(text_primary)
-                                        .strong()
-                                        .monospace(),
-                                );
-
-                                if let Some(c) = node.cost {
-                                    ui.add_space(14.0);
-                                    ui.label(RichText::new("Cost:").size(10.0).color(text_secondary));
-                                    ui.label(
-                                        RichText::new(format_num(c.max(0) as u64))
-                                            .size(11.0)
-                                            .color(text_primary)
-                                            .strong()
-                                            .monospace(),
-                                    );
-                                }
-
-                                ui.add_space(14.0);
-                                ui.label(
-                                    RichText::new("A-Time: - (미실행)")
-                                        .size(10.0)
-                                        .color(Color32::from_rgb(161, 161, 170)),
-                                );
-                            }
-                        });
-
-                        // Buffer Progress Bar (Monochrome, only in runtime when buffers > 0)
-                        if is_runtime && node.buffers > 0 {
-                            let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 4.0), egui::Sense::hover());
-                            let fill_width = (rect.width() * (node.buffer_percentage as f32 / 100.0)).max(2.0);
-
-                            let (track_color, bar_color) = if node.is_bottleneck {
-                                (Color32::from_rgb(63, 63, 70), Color32::WHITE)
-                            } else if is_heavy_buffers {
-                                (Color32::from_rgb(228, 228, 231), Color32::from_rgb(24, 24, 27))
-                            } else {
-                                (Color32::from_rgb(244, 244, 245), Color32::from_rgb(161, 161, 170))
-                            };
-
-                            ui.painter().rect_filled(rect, Rounding::same(2.0), track_color);
-                            ui.painter().rect_filled(
-                                Rect::from_min_size(rect.min, Vec2::new(fill_width, 4.0)),
-                                Rounding::same(2.0),
-                                bar_color,
-                            );
-                        }
-
-                        // Diagnostic Tags
-                        if !node.bottleneck_tags.is_empty() {
-                            ui.add_space(4.0);
-                            ui.horizontal(|ui| {
-                                for tag in &node.bottleneck_tags {
-                                    let tag_bg = if node.is_bottleneck {
-                                        Color32::from_rgb(50, 50, 56)
-                                    } else {
-                                        Color32::from_rgb(244, 244, 245)
-                                    };
-                                    let tag_text = if node.is_bottleneck {
-                                        Color32::WHITE
-                                    } else {
-                                        Color32::from_rgb(82, 82, 91)
-                                    };
-
-                                    egui::Frame::none()
-                                        .fill(tag_bg)
-                                        .rounding(Rounding::same(3.0))
-                                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(113, 113, 122)))
-                                        .inner_margin(egui::Margin::symmetric(6.0, 2.0))
-                                        .show(ui, |ui| {
-                                            ui.label(RichText::new(tag).size(10.0).color(tag_text));
-                                        });
-                                }
-                            });
-                        }
-
-                        // Correlated Predicates (Access & Filter)
-                        if node.access_predicates.is_some() || node.filter_predicates.is_some() {
-                            ui.add_space(4.0);
-                            if let Some(access) = &node.access_predicates {
-                                ui.horizontal(|ui| {
-                                    egui::Frame::none()
-                                        .fill(if node.is_bottleneck { Color32::from_rgb(20, 45, 55) } else { Color32::from_rgb(236, 254, 255) })
-                                        .rounding(Rounding::same(3.0))
-                                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(6, 182, 212)))
-                                        .inner_margin(egui::Margin::symmetric(5.0, 1.5))
-                                        .show(ui, |ui| {
-                                            ui.label(RichText::new("ACCESS").size(9.5).strong().color(Color32::from_rgb(8, 145, 178)));
-                                        });
-                                    ui.add(egui::Label::new(
-                                        RichText::new(access)
-                                            .size(10.5)
-                                            .monospace()
-                                            .color(if node.is_bottleneck { Color32::from_rgb(207, 250, 254) } else { Color32::from_rgb(15, 23, 42) }),
-                                    ).wrap());
-                                });
-                            }
-                            if let Some(filter) = &node.filter_predicates {
-                                ui.add_space(2.0);
-                                ui.horizontal(|ui| {
-                                    egui::Frame::none()
-                                        .fill(if node.is_bottleneck { Color32::from_rgb(55, 40, 15) } else { Color32::from_rgb(254, 252, 232) })
-                                        .rounding(Rounding::same(3.0))
-                                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(234, 179, 8)))
-                                        .inner_margin(egui::Margin::symmetric(5.0, 1.5))
-                                        .show(ui, |ui| {
-                                            ui.label(RichText::new("FILTER").size(9.5).strong().color(Color32::from_rgb(202, 138, 4)));
-                                        });
-                                    ui.add(egui::Label::new(
-                                        RichText::new(filter)
-                                            .size(10.5)
-                                            .monospace()
-                                            .color(if node.is_bottleneck { Color32::from_rgb(254, 243, 199) } else { Color32::from_rgb(15, 23, 42) }),
-                                    ).wrap());
-                                });
-                            }
-                        }
-
-                        // Correlated Outline Hints
-                        if !node.outline_hints.is_empty() {
-                            ui.add_space(3.0);
-                            ui.horizontal(|ui| {
-                                egui::Frame::none()
-                                    .fill(if node.is_bottleneck { Color32::from_rgb(45, 25, 60) } else { Color32::from_rgb(245, 243, 255) })
-                                    .rounding(Rounding::same(3.0))
-                                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(168, 85, 247)))
-                                    .inner_margin(egui::Margin::symmetric(5.0, 1.5))
-                                    .show(ui, |ui| {
-                                        ui.label(RichText::new("OUTLINE").size(9.5).strong().color(Color32::from_rgb(147, 51, 234)));
-                                    });
-                                let hints_joined = node.outline_hints.join("  ");
-                                ui.add(egui::Label::new(
-                                    RichText::new(hints_joined)
-                                        .size(10.0)
                                         .monospace()
-                                        .color(if node.is_bottleneck { Color32::from_rgb(233, 213, 255) } else { Color32::from_rgb(88, 28, 135) }),
-                                ).wrap());
+                                        .color(Color32::from_rgb(100, 116, 139)),
+                                );
+                            },
+                        );
+
+                        // Tree indentation
+                        if depth > 0 {
+                            ui.add_space((depth as f32) * 16.0);
+                            ui.label(
+                                RichText::new("└─")
+                                    .monospace()
+                                    .color(Color32::from_rgb(148, 163, 184)),
+                            );
+                        }
+
+                        // Operation Name & Options
+                        ui.label(
+                            RichText::new(format!("{} {}", node.operation, node.options.as_deref().unwrap_or("")))
+                                .size(12.0)
+                                .strong()
+                                .color(Color32::from_rgb(15, 23, 42)),
+                        );
+
+                        // Object Name
+                        if let Some(obj) = &node.object_name {
+                            ui.label(
+                                RichText::new(format!("({})", obj))
+                                    .size(11.0)
+                                    .strong()
+                                    .monospace()
+                                    .color(Color32::from_rgb(37, 99, 235)),
+                            );
+                        }
+
+                        // Object Alias
+                        if let Some(alias) = &node.object_alias {
+                            ui.label(
+                                RichText::new(format!("@{}", alias))
+                                    .size(10.5)
+                                    .monospace()
+                                    .color(Color32::from_rgb(100, 116, 139)),
+                            );
+                        }
+
+                        // Cost on Right side
+                        if let Some(c) = node.cost {
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(
+                                    RichText::new(format!("Cost: {}", format_num(c.max(0) as u64)))
+                                        .size(10.5)
+                                        .monospace()
+                                        .color(Color32::from_rgb(148, 163, 184)),
+                                );
                             });
                         }
                     });
+
+                    // Line 2: Details Line (Starts, Buffers, A-Rows, A-Time + Filter, Access, Outline)
+                    let detail_indent = 32.0 + (if depth > 0 { (depth as f32) * 16.0 + 18.0 } else { 0.0 });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.add_space(detail_indent);
+
+                        if is_runtime {
+                            // Starts
+                            ui.label(RichText::new("Starts:").size(10.5).color(Color32::from_rgb(100, 116, 139)));
+                            ui.label(
+                                RichText::new(format_num(node.starts))
+                                    .size(10.5)
+                                    .strong()
+                                    .monospace()
+                                    .color(Color32::from_rgb(30, 41, 59)),
+                            );
+
+                            ui.label(RichText::new("|").size(10.5).color(Color32::from_rgb(203, 213, 225)));
+
+                            // Buffers
+                            ui.label(RichText::new("Buffers:").size(10.5).color(Color32::from_rgb(100, 116, 139)));
+                            ui.label(
+                                RichText::new(format_num(node.buffers))
+                                    .size(10.5)
+                                    .strong()
+                                    .monospace()
+                                    .color(Color32::from_rgb(30, 41, 59)),
+                            );
+
+                            ui.label(RichText::new("|").size(10.5).color(Color32::from_rgb(203, 213, 225)));
+
+                            // A-Rows
+                            ui.label(RichText::new("A-Rows:").size(10.5).color(Color32::from_rgb(100, 116, 139)));
+                            ui.label(
+                                RichText::new(format_num(node.a_rows))
+                                    .size(10.5)
+                                    .strong()
+                                    .monospace()
+                                    .color(Color32::from_rgb(30, 41, 59)),
+                            );
+
+                            ui.label(RichText::new("|").size(10.5).color(Color32::from_rgb(203, 213, 225)));
+
+                            // A-Time
+                            ui.label(RichText::new("A-Time:").size(10.5).color(Color32::from_rgb(100, 116, 139)));
+                            ui.label(
+                                RichText::new(format!("{:.2}ms", node.a_time_ms))
+                                    .size(10.5)
+                                    .monospace()
+                                    .color(Color32::from_rgb(30, 41, 59)),
+                            );
+                        } else {
+                            // 1번 방식 (EXPLAIN PLAN FOR)
+                            ui.label(RichText::new("Rows(Est):").size(10.5).color(Color32::from_rgb(100, 116, 139)));
+                            ui.label(
+                                RichText::new(format_num(node.e_rows))
+                                    .size(10.5)
+                                    .strong()
+                                    .monospace()
+                                    .color(Color32::from_rgb(30, 41, 59)),
+                            );
+
+                            if let Some(c) = node.cost {
+                                ui.label(RichText::new("|").size(10.5).color(Color32::from_rgb(203, 213, 225)));
+                                ui.label(RichText::new("Cost:").size(10.5).color(Color32::from_rgb(100, 116, 139)));
+                                ui.label(
+                                    RichText::new(format_num(c.max(0) as u64))
+                                        .size(10.5)
+                                        .monospace()
+                                        .color(Color32::from_rgb(30, 41, 59)),
+                                );
+                            }
+                        }
+
+                        // Access Predicate (same line)
+                        if let Some(access) = &node.access_predicates {
+                            ui.label(RichText::new("|").size(10.5).color(Color32::from_rgb(203, 213, 225)));
+                            ui.label(RichText::new("Access:").size(10.5).strong().color(Color32::from_rgb(8, 145, 178)));
+                            ui.label(RichText::new(access).size(10.5).monospace().color(Color32::from_rgb(15, 23, 42)));
+                        }
+
+                        // Filter Predicate (same line)
+                        if let Some(filter) = &node.filter_predicates {
+                            ui.label(RichText::new("|").size(10.5).color(Color32::from_rgb(203, 213, 225)));
+                            ui.label(RichText::new("Filter:").size(10.5).strong().color(Color32::from_rgb(180, 83, 9)));
+                            ui.label(RichText::new(filter).size(10.5).monospace().color(Color32::from_rgb(15, 23, 42)));
+                        }
+
+                        // Outline Hints (same line)
+                        if !node.outline_hints.is_empty() {
+                            ui.label(RichText::new("|").size(10.5).color(Color32::from_rgb(203, 213, 225)));
+                            ui.label(RichText::new("Outline:").size(10.5).strong().color(Color32::from_rgb(126, 34, 206)));
+                            let hints = node.outline_hints.join(" ");
+                            ui.label(RichText::new(hints).size(10.0).monospace().color(Color32::from_rgb(88, 28, 135)));
+                        }
+                    });
                 });
-        });
+            });
 
-        ui.add_space(6.0);
+        ui.add_space(2.0);
 
-        for child in &node.children {
-            Self::render_node(ui, child, depth + 1, is_runtime);
+        for (c_idx, child) in node.children.iter().enumerate() {
+            Self::render_unified_row(ui, child, depth + 1, is_runtime, c_idx % 2 == 0);
         }
     }
 }

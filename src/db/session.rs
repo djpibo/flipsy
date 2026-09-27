@@ -640,7 +640,8 @@ impl DatabaseSession {
     /// Correlates Plan Table Nodes with Predicates, Object Aliases, and Outline Hints into unified PlanNodes
     pub fn parse_xplan_output(xplan: &str) -> Vec<PlanNode> {
         let mut nodes = Vec::new();
-        let mut pred_map: HashMap<i32, (Option<String>, Option<String>)> = HashMap::new(); // id -> (access, filter)
+        let mut raw_access_map: HashMap<i32, String> = HashMap::new();
+        let mut raw_filter_map: HashMap<i32, String> = HashMap::new();
         let mut alias_map: HashMap<i32, (Option<String>, Option<String>)> = HashMap::new(); // id -> (alias, qblock)
         let mut outline_hints: Vec<String> = Vec::new();
         let mut col_map: HashMap<String, usize> = HashMap::new();
@@ -649,6 +650,7 @@ impl DatabaseSession {
         let mut in_outline_section = false;
         let mut in_pred_section = false;
         let mut current_pred_id: Option<i32> = None;
+        let mut current_clause_type: Option<u8> = None; // 0: access, 1: filter
 
         let parse_val = |s: &str| -> u64 {
             let s = s.trim().to_uppercase();
@@ -836,17 +838,68 @@ impl DatabaseSession {
                 }
             }
 
-            // 4. Parse Predicate Information
+            // 4. Parse Predicate Information (Accurate line & multi-line parenthesis preserving)
             if in_pred_section {
-                if let Some((id, rest)) = Self::parse_id_prefix_line(trimmed) {
-                    current_pred_id = Some(id);
-                    Self::append_predicate(&mut pred_map, id, rest);
-                } else if let Some(id) = current_pred_id {
-                    if !trimmed.is_empty() && !trimmed.starts_with("---") {
-                        Self::append_predicate(&mut pred_map, id, trimmed);
+                if !trimmed.is_empty() && !trimmed.starts_with("---") {
+                    let mut line_text = trimmed;
+                    if let Some((id, rest)) = Self::parse_id_prefix_line(trimmed) {
+                        current_pred_id = Some(id);
+                        line_text = rest;
+                        current_clause_type = None;
+                    }
+
+                    if let Some(id) = current_pred_id {
+                        if line_text.starts_with("access(") {
+                            current_clause_type = Some(0);
+                            let inner = &line_text["access(".len()..];
+                            let entry = raw_access_map.entry(id).or_default();
+                            if !entry.is_empty() {
+                                entry.push(' ');
+                            }
+                            entry.push_str(inner);
+                        } else if line_text.starts_with("filter(") {
+                            current_clause_type = Some(1);
+                            let inner = &line_text["filter(".len()..];
+                            let entry = raw_filter_map.entry(id).or_default();
+                            if !entry.is_empty() {
+                                entry.push(' ');
+                            }
+                            entry.push_str(inner);
+                        } else if let Some(clause_type) = current_clause_type {
+                            let entry = if clause_type == 0 {
+                                raw_access_map.entry(id).or_default()
+                            } else {
+                                raw_filter_map.entry(id).or_default()
+                            };
+                            if !entry.is_empty() {
+                                entry.push(' ');
+                            }
+                            entry.push_str(line_text);
+                        }
                     }
                 }
             }
+        }
+
+        // Post-process Predicates: strip ONLY the single wrapper closing parenthesis ')'
+        let mut pred_map: HashMap<i32, (Option<String>, Option<String>)> = HashMap::new();
+        for (id, raw_s) in raw_access_map {
+            let t = raw_s.trim();
+            let clean = if t.ends_with(')') {
+                &t[..t.len() - 1]
+            } else {
+                t
+            }.trim().to_string();
+            pred_map.entry(id).or_insert((None, None)).0 = Some(clean);
+        }
+        for (id, raw_s) in raw_filter_map {
+            let t = raw_s.trim();
+            let clean = if t.ends_with(')') {
+                &t[..t.len() - 1]
+            } else {
+                t
+            }.trim().to_string();
+            pred_map.entry(id).or_insert((None, None)).1 = Some(clean);
         }
 
         // 5. Correlate All Information onto each PlanNode!
@@ -941,20 +994,7 @@ impl DatabaseSession {
         None
     }
 
-    fn append_predicate(pred_map: &mut HashMap<i32, (Option<String>, Option<String>)>, id: i32, text: &str) {
-        let entry = pred_map.entry(id).or_insert((None, None));
-        if text.contains("access(") {
-            let clean = text.replace("access(", "").trim_end_matches(')').to_string();
-            entry.0 = Some(clean);
-        } else if text.contains("filter(") {
-            let clean = text.replace("filter(", "").trim_end_matches(')').to_string();
-            if let Some(existing) = &entry.1 {
-                entry.1 = Some(format!("{} AND {}", existing, clean));
-            } else {
-                entry.1 = Some(clean);
-            }
-        }
-    }
+
 
 
     pub fn parse_xplan_with_meta(xplan: &str) -> (Vec<PlanNode>, Option<u64>, Option<String>) {
@@ -1678,6 +1718,39 @@ mod tests {
         assert_eq!(nodes[2].operation, "TABLE ACCESS");
         assert_eq!(nodes[2].object_name, Some("EMP".to_string()));
         assert_eq!(nodes[2].a_rows, 14);
+    }
+
+    #[test]
+    fn test_predicate_balanced_parentheses() {
+        let xplan = r#"
+-----------------------------------------------------------------------------------------------------------
+| Id  | Operation          | Name        | Starts | E-Rows | Cost (%CPU)| A-Rows |   A-Time   | Buffers |
+-----------------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT   |             |      1 |        |     3 (100)|      1 |00:00:00.01 |       6 |
+|* 15 |  TABLE ACCESS FULL | TB_ORD_MST  |      1 |   4923 |   608   (0)|   1964 |00:00:00.06 |    1493 |
+|* 23 |  TABLE ACCESS FULL | TB_CUST_MST |      1 |  40000 |   262   (1)|  40000 |00:00:00.01 |     935 |
+-----------------------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+  15 - filter("O"."ORD_DATE">=TO_DATE(' 2025-06-01 00:00:00', 'syyyy-mm-dd hh24:mi:ss') AND
+              ("O"."ORD_STATUS"='DELIVERED' OR "O"."ORD_STATUS"='PAY_COMPLETED' OR "O"."ORD_STATUS"='SHIPPING'))
+  23 - filter(("C"."CUST_GRADE"='GOLD' OR "C"."CUST_GRADE"='VIP' OR "C"."CUST_GRADE"='VVIP'))
+"#;
+        let nodes = DatabaseSession::parse_xplan_output(xplan);
+        assert_eq!(nodes.len(), 3);
+
+        let node23 = nodes.iter().find(|n| n.id == 23).expect("node 23 must exist");
+        let filt23 = node23.filter_predicates.as_ref().expect("node 23 must have filter");
+        assert_eq!(filt23, r#"("C"."CUST_GRADE"='GOLD' OR "C"."CUST_GRADE"='VIP' OR "C"."CUST_GRADE"='VVIP')"#);
+        assert_eq!(filt23.matches('(').count(), filt23.matches(')').count(), "Parentheses must be balanced!");
+
+        let node15 = nodes.iter().find(|n| n.id == 15).expect("node 15 must exist");
+        let filt15 = node15.filter_predicates.as_ref().expect("node 15 must have filter");
+        assert!(filt15.contains("syyyy-mm-dd hh24:mi:ss"));
+        assert!(filt15.contains(r#"("O"."ORD_STATUS"='DELIVERED' OR "O"."ORD_STATUS"='PAY_COMPLETED' OR "O"."ORD_STATUS"='SHIPPING')"#));
+        assert_eq!(filt15.matches('(').count(), filt15.matches(')').count(), "Parentheses must be balanced!");
     }
 
     #[test]
