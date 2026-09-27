@@ -46,6 +46,15 @@ pub struct DatabaseSession {
     pub is_real_oracle: bool,
     pub db_version: String,
     pub last_query_result: Option<QueryResult>,
+    // 1번 방식: EXPLAIN PLAN FOR (F10)
+    pub last_explain_plan: Option<Vec<PlanNode>>,
+    pub last_explain_sql_id: Option<String>,
+    pub last_explain_hash: Option<u64>,
+    // 2번 방식: DBMS.XPLAN (Ctrl+Enter)
+    pub last_xplan: Option<Vec<PlanNode>>,
+    pub last_xplan_sql_id: Option<String>,
+    pub last_xplan_hash: Option<u64>,
+    // Generic / Backward Compatibility
     pub last_plan: Option<Vec<PlanNode>>,
     pub last_sql_id: Option<String>,
     pub last_plan_hash: Option<u64>,
@@ -59,6 +68,12 @@ impl DatabaseSession {
             is_real_oracle: false,
             db_version: String::new(),
             last_query_result: None,
+            last_explain_plan: None,
+            last_explain_sql_id: None,
+            last_explain_hash: None,
+            last_xplan: None,
+            last_xplan_sql_id: None,
+            last_xplan_hash: None,
             last_plan: None,
             last_sql_id: None,
             last_plan_hash: None,
@@ -133,6 +148,12 @@ impl DatabaseSession {
         self.is_real_oracle = false;
         self.db_version.clear();
         self.last_query_result = None;
+        self.last_explain_plan = None;
+        self.last_explain_sql_id = None;
+        self.last_explain_hash = None;
+        self.last_xplan = None;
+        self.last_xplan_sql_id = None;
+        self.last_xplan_hash = None;
         self.last_plan = None;
         self.last_sql_id = None;
         self.last_plan_hash = None;
@@ -247,11 +268,12 @@ impl DatabaseSession {
                     config.username, config.password, config.host, config.port, config.service_name
                 );
 
-                let clean_sql = sql_string.trim().trim_end_matches(';');
+                let clean_sql = sql_string.trim().trim_end_matches(';').trim();
 
                 if is_explain {
+                    // 1번 방식: EXPLAIN PLAN FOR (옵티마이저 예측 실행계획)
                     let plan_script = format!(
-                        "EXPLAIN PLAN FOR {};\nSET PAGESIZE 50000\nSET LINESIZE 32767\nSELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('PLAN_TABLE', NULL, 'ALL +OUTLINE +PREDICATE +ALIAS'));\nEXIT;\n",
+                        "EXPLAIN PLAN FOR {};\nSET PAGESIZE 50000\nSET LINESIZE 32767\nSELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('PLAN_TABLE', NULL, 'TYPICAL +COST +PREDICATE +ALIAS'));\nEXIT;\n",
                         clean_sql
                     );
 
@@ -272,7 +294,7 @@ impl DatabaseSession {
                                 sql_id: Some(final_sql_id.clone()),
                                 child_number: Some(0),
                                 plan_hash_value: final_hash,
-                                message: Some(format!("Oracle 26ai Explain 성공 ({:.2}ms)", elapsed)),
+                                message: Some(format!("Oracle EXPLAIN PLAN FOR 완료 ({:.2}ms)", elapsed)),
                             };
                             let _ = tx.send(ExecutionResult {
                                 query_result: res,
@@ -290,7 +312,7 @@ impl DatabaseSession {
                                 sql_id: None,
                                 child_number: None,
                                 plan_hash_value: None,
-                                message: Some(format!("Explain 오류: {}", err)),
+                                message: Some(format!("EXPLAIN PLAN FOR 오류: {}", err)),
                             };
                             let _ = tx.send(ExecutionResult {
                                 query_result: res,
@@ -301,8 +323,9 @@ impl DatabaseSession {
                         }
                     }
                 } else {
+                    // 2번 방식: DBMS.XPLAN (STATISTICS_LEVEL=ALL 런타임 실행 후 DISPLAY_CURSOR 수집)
                     let query_script = format!(
-                        "SET MARKUP CSV ON QUOTE ON\nSET HEADING ON\nSET FEEDBACK ON SQL_ID\nSET PAGESIZE 50000\nSET LINESIZE 32767\n{};\nEXIT;\n",
+                        "ALTER SESSION SET STATISTICS_LEVEL = ALL;\nSET MARKUP CSV ON QUOTE ON\nSET HEADING ON\nSET FEEDBACK ON SQL_ID\nSET PAGESIZE 50000\nSET LINESIZE 32767\n{};\nEXIT;\n",
                         clean_sql
                     );
 
@@ -314,14 +337,27 @@ impl DatabaseSession {
                             let (computed_id, computed_hash) = compute_oracle_sql_id(&clean_sql);
                             let real_sql_id = parsed_sql_id.unwrap_or(computed_id);
 
-                            let plan_script = format!(
-                                "EXPLAIN PLAN FOR {};\nSET PAGESIZE 50000\nSET LINESIZE 32767\nSELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('PLAN_TABLE', NULL, 'ALL +OUTLINE +PREDICATE +ALIAS'));\nEXIT;\n",
-                                clean_sql
+                            let xplan_script = format!(
+                                "SET PAGESIZE 50000\nSET LINESIZE 32767\nSELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY_CURSOR('{}', NULL, 'ALLSTATS LAST +COST +OUTLINE +PREDICATE'));\nEXIT;\n",
+                                real_sql_id
                             );
 
-                            let (plan_nodes, plan_hash) = if let Ok(plan_out) = DatabaseSession::run_sqlplus_command(&conn_str, &plan_script) {
-                                let (p, h, _) = DatabaseSession::parse_xplan_with_meta(&plan_out);
-                                (Some(p), h.or(Some(computed_hash as u64)))
+                            let (plan_nodes, plan_hash) = if let Ok(xplan_out) = DatabaseSession::run_sqlplus_command(&conn_str, &xplan_script) {
+                                let (p, h, _) = DatabaseSession::parse_xplan_with_meta(&xplan_out);
+                                if !p.is_empty() {
+                                    (Some(p), h.or(Some(computed_hash as u64)))
+                                } else {
+                                    let fallback_script = format!(
+                                        "EXPLAIN PLAN FOR {};\nSET PAGESIZE 50000\nSET LINESIZE 32767\nSELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('PLAN_TABLE', NULL, 'ALL +OUTLINE +PREDICATE +ALIAS'));\nEXIT;\n",
+                                        clean_sql
+                                    );
+                                    if let Ok(fb_out) = DatabaseSession::run_sqlplus_command(&conn_str, &fallback_script) {
+                                        let (p_fb, h_fb, _) = DatabaseSession::parse_xplan_with_meta(&fb_out);
+                                        (Some(p_fb), h_fb.or(Some(computed_hash as u64)))
+                                    } else {
+                                        (None, Some(computed_hash as u64))
+                                    }
+                                }
                             } else {
                                 (None, Some(computed_hash as u64))
                             };
@@ -338,7 +374,7 @@ impl DatabaseSession {
 
                             let limit_notice = if row_count >= 10_000 { " (메모리 보호 상한 10,000건 적용)" } else { "" };
                             let message_text = format!(
-                                "Oracle 26ai Live ({}@{}) - {}건 인출{} ({}) in {:.2}ms",
+                                "Oracle Live ({}@{}) - {}건 인출{} ({}) in {:.2}ms",
                                 config.username, config.service_name, row_count, limit_notice, size_desc, elapsed
                             );
 
@@ -385,15 +421,26 @@ impl DatabaseSession {
                 std::thread::sleep(Duration::from_millis(350));
                 let (query_res, plan_nodes) = MockEngine::execute(&sql_string);
                 let (computed_id, computed_hash) = compute_oracle_sql_id(&sql_string);
+                let nodes = if is_explain {
+                    plan_nodes.into_iter().map(|mut n| {
+                        n.starts = 0;
+                        n.a_rows = 0;
+                        n.buffers = 0;
+                        n.reads = 0;
+                        n.a_time_ms = 0.0;
+                        n
+                    }).collect()
+                } else {
+                    plan_nodes
+                };
                 let _ = tx.send(ExecutionResult {
                     query_result: query_res,
-                    plan_nodes: Some(plan_nodes),
+                    plan_nodes: Some(nodes),
                     plan_hash: Some(computed_hash as u64),
                     sql_id: Some(computed_id),
                 });
             }
         });
-
         AsyncExecutionHandle {
             start_time: Instant::now(),
             tracker,
@@ -596,11 +643,49 @@ impl DatabaseSession {
         let mut pred_map: HashMap<i32, (Option<String>, Option<String>)> = HashMap::new(); // id -> (access, filter)
         let mut alias_map: HashMap<i32, (Option<String>, Option<String>)> = HashMap::new(); // id -> (alias, qblock)
         let mut outline_hints: Vec<String> = Vec::new();
+        let mut col_map: HashMap<String, usize> = HashMap::new();
 
         let mut in_alias_section = false;
         let mut in_outline_section = false;
         let mut in_pred_section = false;
         let mut current_pred_id: Option<i32> = None;
+
+        let parse_val = |s: &str| -> u64 {
+            let s = s.trim().to_uppercase();
+            if s.is_empty() { return 0; }
+            let mut mult: f64 = 1.0;
+            let num_str = if s.ends_with('K') {
+                mult = 1_000.0;
+                &s[..s.len() - 1]
+            } else if s.ends_with('M') {
+                mult = 1_000_000.0;
+                &s[..s.len() - 1]
+            } else if s.ends_with('G') {
+                mult = 1_000_000_000.0;
+                &s[..s.len() - 1]
+            } else {
+                &s
+            };
+            num_str.parse::<f64>().map(|v| (v * mult) as u64).unwrap_or(0)
+        };
+
+        let parse_time = |s: &str| -> f64 {
+            let s = s.trim();
+            if s.is_empty() { return 0.0; }
+            let parts: Vec<&str> = s.split(':').collect();
+            if parts.len() == 3 {
+                let h = parts[0].parse::<f64>().unwrap_or(0.0);
+                let m = parts[1].parse::<f64>().unwrap_or(0.0);
+                let sec = parts[2].parse::<f64>().unwrap_or(0.0);
+                (h * 3600.0 + m * 60.0 + sec) * 1000.0
+            } else if parts.len() == 2 {
+                let m = parts[0].parse::<f64>().unwrap_or(0.0);
+                let sec = parts[1].parse::<f64>().unwrap_or(0.0);
+                (m * 60.0 + sec) * 1000.0
+            } else {
+                s.parse::<f64>().unwrap_or(0.0) * 1000.0
+            }
+        };
 
         for line in xplan.lines() {
             let trimmed = line.trim();
@@ -627,59 +712,108 @@ impl DatabaseSession {
                 in_pred_section = false;
             }
 
-            // 1. Parse Plan Table Rows
+            // Detect Plan Table Header
             if !in_alias_section && !in_outline_section && !in_pred_section {
-                if trimmed.starts_with('|') && !trimmed.contains("Id") && !trimmed.contains("---") {
+                if trimmed.starts_with('|') && trimmed.contains("Id") && trimmed.contains("Operation") {
+                    col_map.clear();
                     let parts: Vec<&str> = trimmed.split('|').map(|s| s.trim()).collect();
-                    if parts.len() >= 7 {
-                        let id_str = parts[1].trim_start_matches('*').trim();
-                        if let Ok(id) = id_str.parse::<i32>() {
-                            let full_op = parts[2].to_string();
-                            let (op, opt) = if full_op.contains("TABLE ACCESS") {
-                                let sub = full_op.replace("TABLE ACCESS", "").trim().to_string();
-                                ("TABLE ACCESS".to_string(), if sub.is_empty() { None } else { Some(sub) })
-                            } else if full_op.contains("INDEX") {
-                                let sub = full_op.replace("INDEX", "").trim().to_string();
-                                ("INDEX".to_string(), if sub.is_empty() { None } else { Some(sub) })
-                            } else {
-                                (full_op.clone(), None)
-                            };
+                    for (idx, name) in parts.iter().enumerate() {
+                        if !name.is_empty() {
+                            col_map.insert(name.to_string(), idx);
+                        }
+                    }
+                    continue;
+                }
 
-                            let name = if parts[3].is_empty() { None } else { Some(parts[3].to_string()) };
-                            let rows = parts[4].parse::<u64>().unwrap_or(1);
-                            let cost = parts[6].split_whitespace().next().and_then(|s| s.parse::<i64>().ok());
+                // 1. Parse Plan Table Rows
+                if trimmed.starts_with('|') && !trimmed.contains("---") && !col_map.is_empty() {
+                    let parts: Vec<&str> = trimmed.split('|').map(|s| s.trim()).collect();
+                    if let Some(&id_idx) = col_map.get("Id") {
+                        if id_idx < parts.len() {
+                            let id_str = parts[id_idx].trim_start_matches('*').trim();
+                            if let Ok(id) = id_str.parse::<i32>() {
+                                let op_idx = col_map.get("Operation").copied().unwrap_or(2);
+                                let full_op = if op_idx < parts.len() { parts[op_idx].to_string() } else { "UNKNOWN".to_string() };
+                                let (op, opt) = if full_op.contains("TABLE ACCESS") {
+                                    let sub = full_op.replace("TABLE ACCESS", "").trim().to_string();
+                                    ("TABLE ACCESS".to_string(), if sub.is_empty() { None } else { Some(sub) })
+                                } else if full_op.contains("INDEX") {
+                                    let sub = full_op.replace("INDEX", "").trim().to_string();
+                                    ("INDEX".to_string(), if sub.is_empty() { None } else { Some(sub) })
+                                } else {
+                                    (full_op.clone(), None)
+                                };
 
-                            let is_bottleneck = full_op.contains("FULL") || full_op.contains("CARTESIAN");
-                            let mut tags = Vec::new();
-                            if full_op.contains("FULL") {
-                                tags.push("Table Full Scan".to_string());
+                                let name = col_map.get("Name").and_then(|&idx| {
+                                    if idx < parts.len() && !parts[idx].is_empty() {
+                                        Some(parts[idx].to_string())
+                                    } else {
+                                        None
+                                    }
+                                });
+
+                                let starts = col_map.get("Starts").and_then(|&idx| {
+                                    if idx < parts.len() { Some(parse_val(parts[idx])) } else { None }
+                                }).unwrap_or(0);
+
+                                let e_rows = col_map.get("E-Rows")
+                                    .or_else(|| col_map.get("Rows"))
+                                    .and_then(|&idx| if idx < parts.len() { Some(parse_val(parts[idx])) } else { None })
+                                    .unwrap_or(1);
+
+                                let a_rows = col_map.get("A-Rows").and_then(|&idx| {
+                                    if idx < parts.len() { Some(parse_val(parts[idx])) } else { None }
+                                }).unwrap_or(0);
+
+                                let buffers = col_map.get("Buffers").and_then(|&idx| {
+                                    if idx < parts.len() { Some(parse_val(parts[idx])) } else { None }
+                                }).unwrap_or(0);
+
+                                let reads = col_map.get("Reads").and_then(|&idx| {
+                                    if idx < parts.len() { Some(parse_val(parts[idx])) } else { None }
+                                }).unwrap_or(0);
+
+                                let a_time_ms = col_map.get("A-Time")
+                                    .or_else(|| col_map.get("Time"))
+                                    .and_then(|&idx| if idx < parts.len() { Some(parse_time(parts[idx])) } else { None })
+                                    .unwrap_or(0.0);
+
+                                let cost = col_map.get("Cost (%CPU)")
+                                    .or_else(|| col_map.get("Cost"))
+                                    .and_then(|&idx| {
+                                        if idx < parts.len() {
+                                            parts[idx].split_whitespace().next().and_then(|s| s.parse::<i64>().ok())
+                                        } else {
+                                            None
+                                        }
+                                    });
+
+                                nodes.push(PlanNode {
+                                    id,
+                                    parent_id: if id > 0 { Some(0) } else { None },
+                                    position: id + 1,
+                                    operation: op,
+                                    options: opt,
+                                    object_name: name,
+                                    starts,
+                                    e_rows,
+                                    a_rows,
+                                    a_time_ms,
+                                    buffers,
+                                    reads,
+                                    cost,
+                                    access_predicates: None,
+                                    filter_predicates: None,
+                                    object_alias: None,
+                                    outline_hints: Vec::new(),
+                                    qblock_name: None,
+                                    cardinality_ratio: 1.0,
+                                    buffer_percentage: 0.0,
+                                    is_bottleneck: false,
+                                    bottleneck_tags: Vec::new(),
+                                    children: Vec::new(),
+                                });
                             }
-
-                            nodes.push(PlanNode {
-                                id,
-                                parent_id: if id > 0 { Some(0) } else { None },
-                                position: id + 1,
-                                operation: op,
-                                options: opt,
-                                object_name: name,
-                                starts: 1,
-                                e_rows: rows,
-                                a_rows: rows,
-                                a_time_ms: 0.1,
-                                buffers: cost.unwrap_or(1) as u64 * 3,
-                                reads: 0,
-                                cost,
-                                access_predicates: None,
-                                filter_predicates: None,
-                                object_alias: None,
-                                outline_hints: Vec::new(),
-                                qblock_name: None,
-                                cardinality_ratio: 1.0,
-                                buffer_percentage: 0.0,
-                                is_bottleneck,
-                                bottleneck_tags: tags,
-                                children: Vec::new(),
-                            });
                         }
                     }
                 }
@@ -716,6 +850,7 @@ impl DatabaseSession {
         }
 
         // 5. Correlate All Information onto each PlanNode!
+        let total_buffers = nodes.iter().map(|n| n.buffers).max().unwrap_or(0).max(1);
         for node in &mut nodes {
             // Predicates
             if let Some((acc, filt)) = pred_map.get(&node.id) {
@@ -729,7 +864,7 @@ impl DatabaseSession {
                 node.qblock_name = qb.clone();
             }
 
-            // Outline Hints matching node's alias or object name
+            // Outline Hints
             let mut matched_hints = Vec::new();
             if let Some(alias) = &node.object_alias {
                 let clean_alias = alias.replace('"', "");
@@ -746,7 +881,6 @@ impl DatabaseSession {
                 }
             }
             if matched_hints.is_empty() {
-                // If operation is join, look for join hint
                 if node.operation.contains("HASH") {
                     for hint in &outline_hints {
                         if hint.starts_with("USE_HASH") {
@@ -762,11 +896,41 @@ impl DatabaseSession {
                 }
             }
             node.outline_hints = matched_hints;
+
+            // Metrics Analysis
+            if node.buffers > 0 {
+                node.buffer_percentage = (node.buffers as f64 / total_buffers as f64) * 100.0;
+            }
+            if node.e_rows > 0 && node.a_rows > 0 {
+                let ratio = if node.a_rows > node.e_rows {
+                    node.a_rows as f64 / node.e_rows as f64
+                } else {
+                    node.e_rows as f64 / node.a_rows as f64
+                };
+                node.cardinality_ratio = ratio;
+            }
+
+            let is_full = node.operation.contains("FULL") || node.options.as_deref().unwrap_or("").contains("FULL");
+            let is_cartesian = node.operation.contains("CARTESIAN");
+            let is_heavy_buf = node.buffer_percentage >= 30.0;
+            let is_heavy_skew = node.cardinality_ratio >= 10.0;
+            node.is_bottleneck = is_full || is_cartesian || is_heavy_buf || is_heavy_skew;
+            if is_full {
+                node.bottleneck_tags.push("Table Full Scan".to_string());
+            }
+            if is_cartesian {
+                node.bottleneck_tags.push("Cartesian Product".to_string());
+            }
+            if is_heavy_buf {
+                node.bottleneck_tags.push("High Buffer I/O".to_string());
+            }
+            if is_heavy_skew {
+                node.bottleneck_tags.push("Cardinality Skew".to_string());
+            }
         }
 
         nodes
     }
-
     fn parse_id_prefix_line(line: &str) -> Option<(i32, &str)> {
         if let Some(idx) = line.find('-') {
             let left = line[..idx].trim();
@@ -1489,6 +1653,56 @@ mod tests {
         let (sql_id, hash) = compute_oracle_sql_id(sql);
         assert_eq!(sql_id, "40qgt0yy470cn");
         assert_eq!(hash, 3158540692);
+    }
+
+    #[test]
+    fn test_parse_xplan_display_cursor() {
+        let xplan = r#"
+-----------------------------------------------------------------------------------------------------------
+| Id  | Operation          | Name | Starts | E-Rows | Cost (%CPU)| A-Rows |   A-Time   | Buffers | Reads  |
+-----------------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT   |      |      1 |        |     3 (100)|      1 |00:00:00.01 |       6 |      6 |
+|   1 |  SORT AGGREGATE    |      |      1 |      1 |            |      1 |00:00:00.01 |       6 |      6 |
+|*  2 |   TABLE ACCESS FULL| EMP  |      1 |     14 |     3   (0)|     14 |00:00:00.01 |       6 |      6 |
+-----------------------------------------------------------------------------------------------------------
+"#;
+        let nodes = DatabaseSession::parse_xplan_output(xplan);
+        assert_eq!(nodes.len(), 3);
+        assert_eq!(nodes[0].id, 0);
+        assert_eq!(nodes[0].starts, 1);
+        assert_eq!(nodes[0].a_rows, 1);
+        assert_eq!(nodes[0].buffers, 6);
+        assert_eq!(nodes[0].reads, 6);
+        assert_eq!(nodes[0].cost, Some(3));
+        assert_eq!(nodes[2].id, 2);
+        assert_eq!(nodes[2].operation, "TABLE ACCESS");
+        assert_eq!(nodes[2].object_name, Some("EMP".to_string()));
+        assert_eq!(nodes[2].a_rows, 14);
+    }
+
+    #[test]
+    fn test_parse_xplan_explain_plan() {
+        let xplan = r#"
+Plan hash value: 2083865914
+
+---------------------------------------------------------------------------
+| Id  | Operation          | Name | Rows  | Bytes | Cost (%CPU)| Time     |
+---------------------------------------------------------------------------
+|   0 | SELECT STATEMENT   |      |     1 |     3 |     3   (0)| 00:00:01 |
+|   1 |  SORT AGGREGATE    |      |     1 |     3 |            |          |
+|*  2 |   TABLE ACCESS FULL| EMP  |    14 |    42 |     3   (0)| 00:00:01 |
+---------------------------------------------------------------------------
+"#;
+        let (nodes, hash, _) = DatabaseSession::parse_xplan_with_meta(xplan);
+        assert_eq!(hash, Some(2083865914));
+        assert_eq!(nodes.len(), 3);
+        assert_eq!(nodes[0].e_rows, 1);
+        assert_eq!(nodes[0].cost, Some(3));
+        assert_eq!(nodes[0].starts, 0);
+        assert_eq!(nodes[0].a_rows, 0);
+        assert_eq!(nodes[0].buffers, 0);
+        assert_eq!(nodes[2].e_rows, 14);
+        assert_eq!(nodes[2].object_name, Some("EMP".to_string()));
     }
 }
 

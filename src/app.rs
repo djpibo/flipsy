@@ -16,10 +16,11 @@ pub enum AppState {
     },
 }
 
-#[derive(PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BottomTab {
     Grid,
-    PlanTree,
+    ExplainPlan,
+    DbmsXplan,
 }
 
 pub struct FlipsyApp {
@@ -92,17 +93,23 @@ impl eframe::App for FlipsyApp {
             if let Ok(res) = handle.rx.try_recv() {
                 let is_explain = handle.is_explain;
                 if let AppState::Workspace { session, active_bottom_tab, grid_view, .. } = &mut self.state {
-                    grid_view.current_page = 1;
-                    session.last_query_result = Some(res.query_result);
-                    if let Some(nodes) = res.plan_nodes {
-                        session.last_plan = Some(nodes);
-                    }
-                    session.last_plan_hash = res.plan_hash;
-                    session.last_sql_id = res.sql_id;
-
                     if is_explain {
-                        *active_bottom_tab = BottomTab::PlanTree;
+                        session.last_explain_plan = res.plan_nodes.clone();
+                        session.last_explain_hash = res.plan_hash;
+                        session.last_explain_sql_id = res.sql_id.clone();
+                        session.last_plan = res.plan_nodes;
+                        session.last_plan_hash = res.plan_hash;
+                        session.last_sql_id = res.sql_id;
+                        *active_bottom_tab = BottomTab::ExplainPlan;
                     } else {
+                        grid_view.current_page = 1;
+                        session.last_query_result = Some(res.query_result);
+                        session.last_xplan = res.plan_nodes.clone();
+                        session.last_xplan_hash = res.plan_hash;
+                        session.last_xplan_sql_id = res.sql_id.clone();
+                        session.last_plan = res.plan_nodes;
+                        session.last_plan_hash = res.plan_hash;
+                        session.last_sql_id = res.sql_id;
                         *active_bottom_tab = BottomTab::Grid;
                     }
                 }
@@ -230,6 +237,24 @@ impl eframe::App for FlipsyApp {
 
                                 ui.add_space(5.0);
 
+                                // 1-2. Explain (1번 방식: EXPLAIN PLAN FOR)
+                                let explain_btn = egui::Button::new(
+                                    RichText::new("⚡ Explain (F10)")
+                                        .size(11.0)
+                                        .strong()
+                                        .color(Color32::from_rgb(39, 39, 42)),
+                                )
+                                .fill(Color32::WHITE)
+                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(212, 212, 216)))
+                                .rounding(Rounding::same(4.0))
+                                .min_size(Vec2::new(105.0, 28.0));
+
+                                if ui.add_enabled(!is_running, explain_btn).clicked() {
+                                    explain_requested = true;
+                                }
+
+                                ui.add_space(5.0);
+
                                 // 2. Bind
                                 let is_bind = editor.active_sidebar == SidebarMode::Bind;
                                 let bind_btn = egui::Button::new(
@@ -326,9 +351,9 @@ impl eframe::App for FlipsyApp {
                                         ui.spinner();
                                         ui.add_space(6.0);
                                         let title = if handle.is_explain {
-                                            "DBMS.XPLAN 분석 중..."
+                                            "1번 방식: EXPLAIN PLAN FOR 분석 중..."
                                         } else {
-                                            "쿼리 실행 및 데이터 인출 중..."
+                                            "2번 방식: 쿼리 실행 및 DBMS.XPLAN 수집 중..."
                                         };
                                         ui.label(
                                             RichText::new(title)
@@ -401,20 +426,26 @@ impl eframe::App for FlipsyApp {
 
                             ui.add_space(4.0);
 
-                            let is_plan = *active_bottom_tab == BottomTab::PlanTree;
-                            let plan_btn = egui::Button::new(
-                                RichText::new("DBMS.XPLAN")
+                            // Tab 2: 1. EXPLAIN PLAN FOR
+                            let is_explain_tab = *active_bottom_tab == BottomTab::ExplainPlan;
+                            let explain_label = if session.last_explain_plan.is_some() {
+                                "1. EXPLAIN PLAN FOR (완료)"
+                            } else {
+                                "1. EXPLAIN PLAN FOR"
+                            };
+                            let explain_tab_btn = egui::Button::new(
+                                RichText::new(explain_label)
                                     .size(12.0)
                                     .strong()
-                                    .color(if is_plan { Color32::WHITE } else { Color32::from_rgb(82, 82, 91) }),
+                                    .color(if is_explain_tab { Color32::WHITE } else { Color32::from_rgb(82, 82, 91) }),
                             )
-                            .fill(if is_plan { Color32::from_rgb(24, 24, 27) } else { Color32::from_rgb(244, 244, 245) })
+                            .fill(if is_explain_tab { Color32::from_rgb(24, 24, 27) } else { Color32::from_rgb(244, 244, 245) })
                             .stroke(Stroke::new(1.0_f32, Color32::from_rgb(228, 228, 231)))
                             .rounding(Rounding::same(4.0));
 
-                            if ui.add(plan_btn).clicked() {
-                                *active_bottom_tab = BottomTab::PlanTree;
-                                if session.last_plan.is_none() && self.active_query.is_none() {
+                            if ui.add(explain_tab_btn).clicked() {
+                                *active_bottom_tab = BottomTab::ExplainPlan;
+                                if session.last_explain_plan.is_none() && self.active_query.is_none() {
                                     let binds = crate::db::session::extract_bind_variables(&editor.sql);
                                     let sql_to_explain = if !binds.is_empty() {
                                         crate::db::session::substitute_bind_variables(&editor.sql, &editor.bind_values)
@@ -424,6 +455,29 @@ impl eframe::App for FlipsyApp {
                                     self.active_query = Some(session.execute_async(&sql_to_explain, true));
                                 }
                             }
+
+                            ui.add_space(4.0);
+
+                            // Tab 3: 2. DBMS.XPLAN
+                            let is_xplan_tab = *active_bottom_tab == BottomTab::DbmsXplan;
+                            let xplan_label = if session.last_xplan.is_some() {
+                                "2. DBMS.XPLAN (수집됨)"
+                            } else {
+                                "2. DBMS.XPLAN"
+                            };
+                            let xplan_tab_btn = egui::Button::new(
+                                RichText::new(xplan_label)
+                                    .size(12.0)
+                                    .strong()
+                                    .color(if is_xplan_tab { Color32::WHITE } else { Color32::from_rgb(82, 82, 91) }),
+                            )
+                            .fill(if is_xplan_tab { Color32::from_rgb(24, 24, 27) } else { Color32::from_rgb(244, 244, 245) })
+                            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(228, 228, 231)))
+                            .rounding(Rounding::same(4.0));
+
+                            if ui.add(xplan_tab_btn).clicked() {
+                                *active_bottom_tab = BottomTab::DbmsXplan;
+                            }
                         });
 
                         ui.add_space(8.0);
@@ -432,8 +486,23 @@ impl eframe::App for FlipsyApp {
                             BottomTab::Grid => {
                                 grid_view.show(ui, session.last_query_result.as_ref());
                             }
-                            BottomTab::PlanTree => {
-                                PlanTreeView::show(ui, session.last_plan.as_ref(), session.last_sql_id.as_deref(), session.last_plan_hash);
+                            BottomTab::ExplainPlan => {
+                                PlanTreeView::show(
+                                    ui,
+                                    session.last_explain_plan.as_ref(),
+                                    session.last_explain_sql_id.as_deref(),
+                                    session.last_explain_hash,
+                                    false,
+                                );
+                            }
+                            BottomTab::DbmsXplan => {
+                                PlanTreeView::show(
+                                    ui,
+                                    session.last_xplan.as_ref(),
+                                    session.last_xplan_sql_id.as_deref(),
+                                    session.last_xplan_hash,
+                                    true,
+                                );
                             }
                         }
                     });

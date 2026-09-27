@@ -104,7 +104,7 @@ impl EditorView {
                             .color(Color32::from_rgb(24, 24, 27)),
                     );
                     ui.label(
-                        RichText::new("(단축키: Ctrl+Enter 실행 | F10 DBMS.XPLAN)")
+                        RichText::new("(단축키: Ctrl+Enter 실행 및 DBMS.XPLAN | F10 EXPLAIN PLAN FOR)")
                             .size(11.0)
                             .color(Color32::from_rgb(113, 113, 122)),
                     );
