@@ -156,7 +156,8 @@ impl eframe::App for FlipsyApp {
                             )
                             .fill(Color32::from_rgb(244, 244, 245))
                             .stroke(Stroke::new(1.0_f32, Color32::from_rgb(228, 228, 231)))
-                            .rounding(Rounding::same(4.0));
+                            .rounding(Rounding::same(4.0))
+                            .min_size(Vec2::new(76.0, 28.0));
 
                             if ui.add(back_btn).clicked() {
                                 return_to_servers = true;
@@ -321,7 +322,7 @@ impl eframe::App for FlipsyApp {
                                         ui.spinner();
                                         ui.add_space(6.0);
                                         let title = if handle.is_explain {
-                                            "XPlan 실행계획 분석 중..."
+                                            "DBMS.XPLAN 분석 중..."
                                         } else {
                                             "쿼리 실행 및 데이터 인출 중..."
                                         };
@@ -398,7 +399,7 @@ impl eframe::App for FlipsyApp {
 
                             let is_plan = *active_bottom_tab == BottomTab::PlanTree;
                             let plan_btn = egui::Button::new(
-                                RichText::new("실행계획 트리 (XPlan)")
+                                RichText::new("DBMS.XPLAN")
                                     .size(12.0)
                                     .strong()
                                     .color(if is_plan { Color32::WHITE } else { Color32::from_rgb(82, 82, 91) }),

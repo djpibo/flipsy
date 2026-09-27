@@ -27,7 +27,7 @@ impl PlanTreeView {
                 let total_reads = root.reads;
                 let total_time = root.a_time_ms;
 
-                // KPI Header (Light Monochrome)
+                // KPI Header (Light Monochrome - English Only)
                 egui::Frame::none()
                     .fill(Color32::WHITE)
                     .rounding(Rounding::same(6.0))
@@ -35,49 +35,51 @@ impl PlanTreeView {
                     .inner_margin(egui::Margin::same(12.0))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
+                            // 1. A-Time
                             ui.vertical(|ui| {
-                                ui.label(RichText::new("총 소요 시간 (A-Time)").size(11.0).color(Color32::from_rgb(113, 113, 122)));
+                                ui.label(RichText::new("A-Time").size(11.0).color(Color32::from_rgb(113, 113, 122)));
                                 ui.label(RichText::new(format!("{:.2} ms", total_time)).size(15.0).strong().monospace().color(Color32::from_rgb(24, 24, 27)));
                             });
 
                             ui.add_space(28.0);
 
+                            // 2. Buffers
                             ui.vertical(|ui| {
-                                ui.label(RichText::new("총 버퍼 블록 (Buffers)").size(11.0).color(Color32::from_rgb(113, 113, 122)));
+                                ui.label(RichText::new("Buffers").size(11.0).color(Color32::from_rgb(113, 113, 122)));
                                 ui.label(RichText::new(format_num(total_buffers)).size(15.0).strong().monospace().color(Color32::from_rgb(24, 24, 27)));
                             });
 
                             ui.add_space(28.0);
 
+                            // 3. Reads
                             ui.vertical(|ui| {
-                                ui.label(RichText::new("물리적 디스크 읽기 (Reads)").size(11.0).color(Color32::from_rgb(113, 113, 122)));
+                                ui.label(RichText::new("Reads").size(11.0).color(Color32::from_rgb(113, 113, 122)));
                                 ui.label(RichText::new(format_num(total_reads)).size(15.0).strong().monospace().color(Color32::from_rgb(24, 24, 27)));
                             });
 
                             ui.add_space(28.0);
 
+                            // 4. Cost
+                            let total_cost = root.cost.or_else(|| nodes.iter().filter_map(|n| n.cost).max());
                             ui.vertical(|ui| {
-                                ui.label(RichText::new("SQL ID / Plan Hash").size(11.0).color(Color32::from_rgb(113, 113, 122)));
-                                let s_id = sql_id.unwrap_or("ora26ai_live");
-                                let p_hash = plan_hash.map(|h| h.to_string()).unwrap_or_else(|| "272002086".to_string());
+                                ui.label(RichText::new("Cost").size(11.0).color(Color32::from_rgb(113, 113, 122)));
+                                let cost_str = total_cost.map(|c| format_num(c.max(0) as u64)).unwrap_or_else(|| "-".to_string());
+                                ui.label(RichText::new(cost_str).size(15.0).strong().monospace().color(Color32::from_rgb(24, 24, 27)));
+                            });
+
+                            ui.add_space(28.0);
+
+                            // 5. SQL_ID / Plan Hash
+                            ui.vertical(|ui| {
+                                ui.label(RichText::new("SQL_ID / Plan Hash").size(11.0).color(Color32::from_rgb(113, 113, 122)));
+                                let s_id = sql_id.unwrap_or("-");
+                                let p_hash = plan_hash.map(|h| h.to_string()).unwrap_or_else(|| "-".to_string());
                                 ui.label(
                                     RichText::new(format!("{} / {}", s_id, p_hash))
                                         .size(13.0)
                                         .strong()
                                         .monospace()
                                         .color(Color32::from_rgb(79, 70, 229)),
-                                );
-                            });
-
-                            ui.add_space(28.0);
-
-                            ui.vertical(|ui| {
-                                ui.label(RichText::new("주요 튜닝 진단").size(11.0).color(Color32::from_rgb(113, 113, 122)));
-                                ui.label(
-                                    RichText::new("TB_CENTER_INVENTORY 150K Starts 왜곡 발생")
-                                        .size(13.0)
-                                        .strong()
-                                        .color(Color32::from_rgb(24, 24, 27)),
                                 );
                             });
                         });
@@ -110,7 +112,7 @@ impl PlanTreeView {
                     .show(ui, |ui| {
                         ui.vertical_centered(|ui| {
                             ui.label(
-                                RichText::new("SQL을 실행하거나 Explain(F10)을 누르면 실제 A-Plan 실행계획 트리가 시각화됩니다.")
+                                RichText::new("SQL을 실행하거나 Explain(F10)을 누르면 실제 DBMS.XPLAN 트리가 시각화됩니다.")
                                     .color(Color32::from_rgb(113, 113, 122))
                                     .size(13.0),
                             );
@@ -250,6 +252,18 @@ impl PlanTreeView {
                                 .strong()
                                 .monospace(),
                         );
+
+                        if let Some(c) = node.cost {
+                            ui.add_space(14.0);
+                            ui.label(RichText::new("Cost:").size(10.0).color(text_secondary));
+                            ui.label(
+                                RichText::new(format_num(c.max(0) as u64))
+                                    .size(11.0)
+                                    .color(text_primary)
+                                    .strong()
+                                    .monospace(),
+                            );
+                        }
 
                         ui.add_space(14.0);
                         ui.label(

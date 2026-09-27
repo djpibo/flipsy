@@ -258,24 +258,27 @@ impl DatabaseSession {
                     let plan_res = DatabaseSession::run_sqlplus_streaming(&conn_str, &plan_script, &tracker_clone);
                     let elapsed = start.elapsed().as_secs_f64() * 1000.0;
 
+                    let (computed_id, computed_hash) = compute_oracle_sql_id(&sql_string);
                     match plan_res {
                         Ok(plan_output) => {
                             let (nodes, hash, sql_id) = DatabaseSession::parse_xplan_with_meta(&plan_output);
+                            let final_hash = hash.or(Some(computed_hash as u64));
+                            let final_sql_id = sql_id.unwrap_or(computed_id);
                             let res = QueryResult {
                                 columns: vec!["PLAN_TABLE_OUTPUT".to_string()],
                                 rows: plan_output.lines().map(|l| vec![l.to_string()]).collect(),
                                 elapsed_ms: elapsed,
                                 row_count: nodes.len(),
-                                sql_id: sql_id.clone().or(Some("ora26ai_live".to_string())),
+                                sql_id: Some(final_sql_id.clone()),
                                 child_number: Some(0),
-                                plan_hash_value: hash,
+                                plan_hash_value: final_hash,
                                 message: Some(format!("Oracle 26ai Explain 성공 ({:.2}ms)", elapsed)),
                             };
                             let _ = tx.send(ExecutionResult {
                                 query_result: res,
                                 plan_nodes: Some(nodes),
-                                plan_hash: hash,
-                                sql_id: sql_id.or(Some("ora26ai_live".to_string())),
+                                plan_hash: final_hash,
+                                sql_id: Some(final_sql_id),
                             });
                         }
                         Err(err) => {
@@ -299,25 +302,28 @@ impl DatabaseSession {
                     }
                 } else {
                     let query_script = format!(
-                        "SET MARKUP CSV ON QUOTE ON\nSET HEADING ON\nSET FEEDBACK OFF\nSET PAGESIZE 50000\nSET LINESIZE 32767\n{};\nEXIT;\n",
+                        "SET MARKUP CSV ON QUOTE ON\nSET HEADING ON\nSET FEEDBACK ON SQL_ID\nSET PAGESIZE 50000\nSET LINESIZE 32767\n{};\nEXIT;\n",
                         clean_sql
                     );
 
                     match DatabaseSession::run_sqlplus_streaming(&conn_str, &query_script, &tracker_clone) {
                         Ok(csv_output) => {
                             let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-                            let (cols, rows) = DatabaseSession::parse_csv_output(&csv_output);
+                            let (cols, rows, parsed_sql_id) = DatabaseSession::parse_csv_output_with_sql_id(&csv_output);
+
+                            let (computed_id, computed_hash) = compute_oracle_sql_id(&clean_sql);
+                            let real_sql_id = parsed_sql_id.unwrap_or(computed_id);
 
                             let plan_script = format!(
                                 "EXPLAIN PLAN FOR {};\nSET PAGESIZE 50000\nSET LINESIZE 32767\nSELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('PLAN_TABLE', NULL, 'ALL +OUTLINE +PREDICATE +ALIAS'));\nEXIT;\n",
                                 clean_sql
                             );
 
-                            let (plan_nodes, plan_hash, sql_id) = if let Ok(plan_out) = DatabaseSession::run_sqlplus_command(&conn_str, &plan_script) {
-                                let (p, h, s) = DatabaseSession::parse_xplan_with_meta(&plan_out);
-                                (Some(p), h, s.or(Some("ora26ai_live".to_string())))
+                            let (plan_nodes, plan_hash) = if let Ok(plan_out) = DatabaseSession::run_sqlplus_command(&conn_str, &plan_script) {
+                                let (p, h, _) = DatabaseSession::parse_xplan_with_meta(&plan_out);
+                                (Some(p), h.or(Some(computed_hash as u64)))
                             } else {
-                                (None, None, None)
+                                (None, Some(computed_hash as u64))
                             };
 
                             let row_count = rows.len();
@@ -335,7 +341,7 @@ impl DatabaseSession {
                                 rows,
                                 elapsed_ms: elapsed,
                                 row_count,
-                                sql_id: sql_id.clone(),
+                                sql_id: Some(real_sql_id.clone()),
                                 child_number: Some(0),
                                 plan_hash_value: plan_hash,
                                 message: Some(format!(
@@ -348,7 +354,7 @@ impl DatabaseSession {
                                 query_result: res,
                                 plan_nodes,
                                 plan_hash,
-                                sql_id,
+                                sql_id: Some(real_sql_id),
                             });
                         }
                         Err(err) => {
@@ -375,11 +381,12 @@ impl DatabaseSession {
             } else {
                 std::thread::sleep(Duration::from_millis(350));
                 let (query_res, plan_nodes) = MockEngine::execute(&sql_string);
+                let (computed_id, computed_hash) = compute_oracle_sql_id(&sql_string);
                 let _ = tx.send(ExecutionResult {
                     query_result: query_res,
                     plan_nodes: Some(plan_nodes),
-                    plan_hash: Some(272002086),
-                    sql_id: Some("mock_ora26ai".to_string()),
+                    plan_hash: Some(computed_hash as u64),
+                    sql_id: Some(computed_id),
                 });
             }
         });
@@ -394,6 +401,7 @@ impl DatabaseSession {
 
     #[allow(dead_code)]
     pub fn explain(&mut self, sql: &str) {
+        let (computed_id, computed_hash) = compute_oracle_sql_id(sql);
         if self.is_real_oracle {
             let conn_str = format!(
                 "{}/{}@{}:{}/{}",
@@ -408,8 +416,8 @@ impl DatabaseSession {
                 let (parsed_plan, hash, sql_id) = Self::parse_xplan_with_meta(&plan_output);
                 if !parsed_plan.is_empty() {
                     self.last_plan = Some(parsed_plan);
-                    self.last_plan_hash = hash;
-                    self.last_sql_id = sql_id.or(Some("ora26ai_live".to_string()));
+                    self.last_plan_hash = hash.or(Some(computed_hash as u64));
+                    self.last_sql_id = Some(sql_id.unwrap_or(computed_id));
                     return;
                 }
             }
@@ -417,12 +425,13 @@ impl DatabaseSession {
 
         let (_, mock_plan) = MockEngine::execute(sql);
         self.last_plan = Some(mock_plan);
-        self.last_plan_hash = Some(272002086);
-        self.last_sql_id = Some("mock_ora26ai".to_string());
+        self.last_plan_hash = Some(computed_hash as u64);
+        self.last_sql_id = Some(computed_id);
     }
 
     #[allow(dead_code)]
     pub fn execute(&mut self, sql: &str) -> QueryResult {
+        let (computed_id, computed_hash) = compute_oracle_sql_id(sql);
         if self.is_real_oracle {
             let start = Instant::now();
             let conn_str = format!(
@@ -432,14 +441,15 @@ impl DatabaseSession {
 
             let clean_sql = sql.trim().trim_end_matches(';');
             let query_script = format!(
-                "SET MARKUP CSV ON QUOTE ON\nSET HEADING ON\nSET FEEDBACK OFF\nSET PAGESIZE 50000\nSET LINESIZE 32767\n{};\nEXIT;\n",
+                "SET MARKUP CSV ON QUOTE ON\nSET HEADING ON\nSET FEEDBACK ON SQL_ID\nSET PAGESIZE 50000\nSET LINESIZE 32767\n{};\nEXIT;\n",
                 clean_sql
             );
 
             match Self::run_sqlplus_command(&conn_str, &query_script) {
                 Ok(csv_output) => {
                     let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-                    let (cols, rows) = Self::parse_csv_output(&csv_output);
+                    let (cols, rows, parsed_sql_id) = Self::parse_csv_output_with_sql_id(&csv_output);
+                    let real_sql_id = parsed_sql_id.unwrap_or(computed_id);
 
                     // Extract detailed XPLAN with ALL +OUTLINE +PREDICATE +ALIAS
                     let plan_script = format!(
@@ -447,22 +457,22 @@ impl DatabaseSession {
                         clean_sql
                     );
                     if let Ok(plan_output) = Self::run_sqlplus_command(&conn_str, &plan_script) {
-                        let (parsed_plan, hash, sql_id) = Self::parse_xplan_with_meta(&plan_output);
+                        let (parsed_plan, hash, _) = Self::parse_xplan_with_meta(&plan_output);
                         if !parsed_plan.is_empty() {
                             self.last_plan = Some(parsed_plan);
-                            self.last_plan_hash = hash;
-                            self.last_sql_id = sql_id.or(Some("ora26ai_live".to_string()));
+                            self.last_plan_hash = hash.or(Some(computed_hash as u64));
+                            self.last_sql_id = Some(real_sql_id.clone());
                         } else {
                             let (_, mock_plan) = MockEngine::execute(sql);
                             self.last_plan = Some(mock_plan);
-                            self.last_plan_hash = Some(272002086);
-                            self.last_sql_id = Some("mock_ora26ai".to_string());
+                            self.last_plan_hash = Some(computed_hash as u64);
+                            self.last_sql_id = Some(real_sql_id.clone());
                         }
                     } else {
                         let (_, mock_plan) = MockEngine::execute(sql);
                         self.last_plan = Some(mock_plan);
-                        self.last_plan_hash = Some(272002086);
-                        self.last_sql_id = Some("mock_ora26ai".to_string());
+                        self.last_plan_hash = Some(computed_hash as u64);
+                        self.last_sql_id = Some(real_sql_id.clone());
                     }
 
                     let row_count = rows.len();
@@ -471,11 +481,11 @@ impl DatabaseSession {
                         rows,
                         elapsed_ms: elapsed,
                         row_count,
-                        sql_id: Some("ora26ai_live".to_string()),
+                        sql_id: Some(real_sql_id.clone()),
                         child_number: Some(0),
-                        plan_hash_value: Some(272002086),
+                        plan_hash_value: self.last_plan_hash,
                         message: Some(format!(
-                            "● Oracle 26ai Live ({}@{}) - {} rows in {:.2}ms",
+                            "Oracle 26ai Live ({}@{}) - {} rows in {:.2}ms",
                             self.config.username, self.config.service_name, row_count, elapsed
                         )),
                     };
@@ -499,20 +509,21 @@ impl DatabaseSession {
                 }
             }
         }
-
         // Fallback to MockEngine for simulation
         let (result, plan) = MockEngine::execute(sql);
+        let (computed_id, computed_hash) = compute_oracle_sql_id(sql);
         self.last_query_result = Some(result.clone());
         self.last_plan = Some(plan);
-        self.last_plan_hash = Some(272002086);
-        self.last_sql_id = Some("mock_ora26ai".to_string());
+        self.last_plan_hash = Some(computed_hash as u64);
+        self.last_sql_id = Some(computed_id);
         result
     }
 
-    fn parse_csv_output(csv: &str) -> (Vec<String>, Vec<Vec<String>>) {
+    pub fn parse_csv_output_with_sql_id(csv: &str) -> (Vec<String>, Vec<Vec<String>>, Option<String>) {
         let mut lines = csv.lines();
         let mut columns = Vec::new();
         let mut rows = Vec::new();
+        let mut captured_sql_id = None;
 
         if let Some(header) = lines.next() {
             columns = Self::parse_csv_line(header);
@@ -520,7 +531,16 @@ impl DatabaseSession {
 
         for line in lines {
             let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.contains("rows selected") || trimmed.contains("no rows") {
+            if trimmed.is_empty() || trimmed.contains("rows selected") || trimmed.contains("row selected") || trimmed.contains("no rows") {
+                continue;
+            }
+            if trimmed.starts_with("SQL_ID:") || trimmed.starts_with("SQL_ID ") {
+                if let Some(id) = trimmed.split_whitespace().last() {
+                    let clean = id.trim_matches(':').trim();
+                    if clean.len() == 13 {
+                        captured_sql_id = Some(clean.to_string());
+                    }
+                }
                 continue;
             }
             let row = Self::parse_csv_line(trimmed);
@@ -529,7 +549,13 @@ impl DatabaseSession {
             }
         }
 
-        (columns, rows)
+        (columns, rows, captured_sql_id)
+    }
+
+    #[allow(dead_code)]
+    pub fn parse_csv_output(csv: &str) -> (Vec<String>, Vec<Vec<String>>) {
+        let (cols, rows, _) = Self::parse_csv_output_with_sql_id(csv);
+        (cols, rows)
     }
 
     fn parse_csv_line(line: &str) -> Vec<String> {
@@ -760,6 +786,7 @@ impl DatabaseSession {
             }
         }
     }
+
 
     pub fn parse_xplan_with_meta(xplan: &str) -> (Vec<PlanNode>, Option<u64>, Option<String>) {
         let nodes = Self::parse_xplan_output(xplan);
@@ -1450,4 +1477,118 @@ mod tests {
         assert!(substituted.contains("'VIP'"));
         assert!(substituted.contains("'FLASH_SALE'"));
     }
+
+    #[test]
+    fn test_compute_oracle_sql_id() {
+        let sql = "SELECT banner FROM v$version";
+        let (sql_id, hash) = compute_oracle_sql_id(sql);
+        assert_eq!(sql_id, "40qgt0yy470cn");
+        assert_eq!(hash, 3158540692);
+    }
 }
+
+
+fn md5_digest(data: &[u8]) -> [u8; 16] {
+    let mut a: u32 = 0x67452301;
+    let mut b: u32 = 0xefcdab89;
+    let mut c: u32 = 0x98badcfe;
+    let mut d: u32 = 0x10325476;
+
+    let s = [
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+        5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20,
+        4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+        6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+    ];
+
+    let k: [u32; 64] = [
+        0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee,
+        0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
+        0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be,
+        0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821,
+        0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa,
+        0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
+        0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
+        0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a,
+        0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c,
+        0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
+        0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05,
+        0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
+        0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039,
+        0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+        0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1,
+        0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391,
+    ];
+
+    let orig_len_bits = (data.len() as u64) * 8;
+    let mut msg = data.to_vec();
+    msg.push(0x80);
+    while (msg.len() % 64) != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&orig_len_bits.to_le_bytes());
+
+    for chunk in msg.chunks(64) {
+        let mut m = [0u32; 16];
+        for (i, word) in m.iter_mut().enumerate() {
+            let start = i * 4;
+            *word = u32::from_le_bytes([chunk[start], chunk[start + 1], chunk[start + 2], chunk[start + 3]]);
+        }
+
+        let mut aa = a;
+        let mut bb = b;
+        let mut cc = c;
+        let mut dd = d;
+
+        for i in 0..64 {
+            let (f, g) = match i {
+                0..=15 => ((bb & cc) | (!bb & dd), i),
+                16..=31 => ((dd & bb) | (!dd & cc), (5 * i + 1) % 16),
+                32..=47 => (bb ^ cc ^ dd, (3 * i + 5) % 16),
+                _ => (cc ^ (bb | !dd), (7 * i) % 16),
+            };
+
+            let temp = dd;
+            dd = cc;
+            cc = bb;
+            let sum = aa.wrapping_add(f).wrapping_add(k[i]).wrapping_add(m[g]);
+            bb = bb.wrapping_add(sum.rotate_left(s[i]));
+            aa = temp;
+        }
+
+        a = a.wrapping_add(aa);
+        b = b.wrapping_add(bb);
+        c = c.wrapping_add(cc);
+        d = d.wrapping_add(dd);
+    }
+
+    let mut out = [0u8; 16];
+    out[0..4].copy_from_slice(&a.to_le_bytes());
+    out[4..8].copy_from_slice(&b.to_le_bytes());
+    out[8..12].copy_from_slice(&c.to_le_bytes());
+    out[12..16].copy_from_slice(&d.to_le_bytes());
+    out
+}
+
+pub fn compute_oracle_sql_id(sql: &str) -> (String, u32) {
+    let clean = sql.trim().trim_end_matches(';');
+    let mut bytes = clean.as_bytes().to_vec();
+    bytes.push(0);
+
+    let digest = md5_digest(&bytes);
+    let w3 = u32::from_le_bytes([digest[8], digest[9], digest[10], digest[11]]);
+    let w4 = u32::from_le_bytes([digest[12], digest[13], digest[14], digest[15]]);
+
+    let val = ((w3 as u64) << 32) | (w4 as u64);
+    let alphabet = b"0123456789abcdfghjkmnpqrstuvwxyz";
+
+    let mut sql_id = String::with_capacity(13);
+    for i in 0..13 {
+        let shift = 5 * (12 - i);
+        let idx = ((val >> shift) & 31) as usize;
+        sql_id.push(alphabet[idx] as char);
+    }
+
+    (sql_id, w4)
+}
+
