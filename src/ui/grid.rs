@@ -161,13 +161,29 @@ impl GridView {
                 ui.add_space(6.0);
 
                 // Table Frame
-                egui::Frame::none()
-                    .fill(Color32::WHITE)
-                    .rounding(Rounding::same(6.0))
-                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(228, 228, 231)))
-                    .inner_margin(egui::Margin::same(10.0))
-                    .show(ui, |ui| {
-                        egui::ScrollArea::both()
+                if total_rows == 0 {
+                    egui::Frame::none()
+                        .fill(Color32::WHITE)
+                        .rounding(Rounding::same(6.0))
+                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(228, 228, 231)))
+                        .inner_margin(egui::Margin::same(30.0))
+                        .show(ui, |ui| {
+                            ui.vertical_centered(|ui| {
+                                ui.label(
+                                    RichText::new("조회 결과가 없습니다 (0건 인출).")
+                                        .color(Color32::from_rgb(113, 113, 122))
+                                        .size(12.5),
+                                );
+                            });
+                        });
+                } else {
+                    egui::Frame::none()
+                        .fill(Color32::WHITE)
+                        .rounding(Rounding::same(6.0))
+                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(228, 228, 231)))
+                        .inner_margin(egui::Margin::same(10.0))
+                        .show(ui, |ui| {
+                            egui::ScrollArea::both()
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 egui::Grid::new("result_data_grid")
@@ -212,6 +228,7 @@ impl GridView {
                                     });
                             });
                     });
+                }
             }
             None => {
                 egui::Frame::none()

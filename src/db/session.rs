@@ -325,7 +325,7 @@ impl DatabaseSession {
                 } else {
                     // 2번 방식: DBMS.XPLAN (STATISTICS_LEVEL=ALL 런타임 실행 후 DISPLAY_CURSOR 수집)
                     let query_script = format!(
-                        "ALTER SESSION SET STATISTICS_LEVEL = ALL;\nSET MARKUP CSV ON QUOTE ON\nSET HEADING ON\nSET FEEDBACK ON SQL_ID\nSET PAGESIZE 50000\nSET LINESIZE 32767\n{};\nEXIT;\n",
+                        "SET FEEDBACK OFF\nALTER SESSION SET STATISTICS_LEVEL = ALL;\nSET MARKUP CSV ON QUOTE ON\nSET HEADING ON\nSET FEEDBACK ON SQL_ID\nSET PAGESIZE 50000\nSET LINESIZE 32767\n{};\nEXIT;\n",
                         clean_sql
                     );
 
@@ -491,7 +491,7 @@ impl DatabaseSession {
 
             let clean_sql = sql.trim().trim_end_matches(';');
             let query_script = format!(
-                "SET MARKUP CSV ON QUOTE ON\nSET HEADING ON\nSET FEEDBACK ON SQL_ID\nSET PAGESIZE 50000\nSET LINESIZE 32767\n{};\nEXIT;\n",
+                "SET FEEDBACK OFF\nSET MARKUP CSV ON QUOTE ON\nSET HEADING ON\nSET FEEDBACK ON SQL_ID\nSET PAGESIZE 50000\nSET LINESIZE 32767\n{};\nEXIT;\n",
                 clean_sql
             );
 
@@ -575,13 +575,18 @@ impl DatabaseSession {
         let mut rows = Vec::new();
         let mut captured_sql_id = None;
 
-        if let Some(header) = lines.next() {
-            columns = Self::parse_csv_line(header);
-        }
-
-        for line in lines {
+        // 1. Scan for true column header, skipping empty lines, session alter messages, and banners
+        for line in lines.by_ref() {
             let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.contains("rows selected") || trimmed.contains("row selected") || trimmed.contains("no rows") {
+            if trimmed.is_empty()
+                || trimmed.eq_ignore_ascii_case("Session altered.")
+                || trimmed.contains("Session altered")
+                || trimmed.contains("PL/SQL procedure successfully completed")
+                || trimmed.starts_with("Connected")
+                || trimmed.contains("rows selected")
+                || trimmed.contains("row selected")
+                || trimmed.contains("no rows")
+            {
                 continue;
             }
             if trimmed.starts_with("SQL_ID:") || trimmed.starts_with("SQL_ID ") {
@@ -593,8 +598,38 @@ impl DatabaseSession {
                 }
                 continue;
             }
+
+            let parsed_cols = Self::parse_csv_line(trimmed);
+            if !parsed_cols.is_empty() && parsed_cols.iter().any(|c| !c.is_empty()) {
+                columns = parsed_cols;
+                break;
+            }
+        }
+
+        // 2. Parse data rows following the header
+        for line in lines {
+            let trimmed = line.trim();
+            if trimmed.is_empty()
+                || trimmed.contains("rows selected")
+                || trimmed.contains("row selected")
+                || trimmed.contains("no rows")
+                || trimmed.contains("Session altered")
+                || trimmed.contains("PL/SQL procedure")
+            {
+                continue;
+            }
+            if trimmed.starts_with("SQL_ID:") || trimmed.starts_with("SQL_ID ") {
+                if let Some(id) = trimmed.split_whitespace().last() {
+                    let clean = id.trim_matches(':').trim();
+                    if clean.len() == 13 {
+                        captured_sql_id = Some(clean.to_string());
+                    }
+                }
+                continue;
+            }
+
             let row = Self::parse_csv_line(trimmed);
-            if !row.is_empty() && row.len() == columns.len() {
+            if !row.is_empty() && (columns.is_empty() || row.len() == columns.len()) {
                 if rows.len() < 10_000 {
                     rows.push(row);
                 }
@@ -611,10 +646,14 @@ impl DatabaseSession {
     }
 
     fn parse_csv_line(line: &str) -> Vec<String> {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return Vec::new();
+        }
         let mut fields = Vec::new();
         let mut current = String::new();
         let mut in_quotes = false;
-        let mut chars = line.chars().peekable();
+        let mut chars = trimmed.chars().peekable();
 
         while let Some(c) = chars.next() {
             match c {
@@ -1685,6 +1724,40 @@ mod tests {
         assert!(substituted.contains("'2025-07-01'"));
         assert!(substituted.contains("'VIP'"));
         assert!(substituted.contains("'FLASH_SALE'"));
+    }
+
+    #[test]
+    fn test_parse_csv_output_with_session_altered() {
+        let sample = "
+Session altered.
+
+\"CUST_ID\",\"ORD_STATUS\",\"FINAL_PAY_AMT\",\"CUST_NM\",\"CUST_GRADE\",\"CITY\"
+\"C001\",\"DELIVERED\",150000,\"Kim\",\"VIP\",\"Seoul\"
+\"C002\",\"PAY_COMPLETED\",80000,\"Lee\",\"GOLD\",\"Busan\"
+
+2 rows selected.
+
+SQL_ID: 6ykqdm2dgrdp7
+";
+        let (cols, rows, sql_id) = DatabaseSession::parse_csv_output_with_sql_id(sample);
+        assert_eq!(cols, vec!["CUST_ID", "ORD_STATUS", "FINAL_PAY_AMT", "CUST_NM", "CUST_GRADE", "CITY"]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], vec!["C001", "DELIVERED", "150000", "Kim", "VIP", "Seoul"]);
+        assert_eq!(rows[1], vec!["C002", "PAY_COMPLETED", "80000", "Lee", "GOLD", "Busan"]);
+        assert_eq!(sql_id, Some("6ykqdm2dgrdp7".to_string()));
+
+        // Also test 0 rows selected case
+        let sample_zero = "
+Session altered.
+
+no rows selected
+
+SQL_ID: fu8vxya07qrfq
+";
+        let (cols_z, rows_z, sql_id_z) = DatabaseSession::parse_csv_output_with_sql_id(sample_zero);
+        assert!(cols_z.is_empty());
+        assert!(rows_z.is_empty());
+        assert_eq!(sql_id_z, Some("fu8vxya07qrfq".to_string()));
     }
 
     #[test]
