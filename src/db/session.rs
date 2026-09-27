@@ -336,6 +336,12 @@ impl DatabaseSession {
                                 format!("{:.1} KB", total_bytes as f64 / 1024.0)
                             };
 
+                            let limit_notice = if row_count >= 10_000 { " (메모리 보호 상한 10,000건 적용)" } else { "" };
+                            let message_text = format!(
+                                "Oracle 26ai Live ({}@{}) - {}건 인출{} ({}) in {:.2}ms",
+                                config.username, config.service_name, row_count, limit_notice, size_desc, elapsed
+                            );
+
                             let res = QueryResult {
                                 columns: cols,
                                 rows,
@@ -344,10 +350,7 @@ impl DatabaseSession {
                                 sql_id: Some(real_sql_id.clone()),
                                 child_number: Some(0),
                                 plan_hash_value: plan_hash,
-                                message: Some(format!(
-                                    "Oracle 26ai Live ({}@{}) - {}건 인출 ({}) in {:.2}ms",
-                                    config.username, config.service_name, row_count, size_desc, elapsed
-                                )),
+                                message: Some(message_text),
                             };
 
                             let _ = tx.send(ExecutionResult {
@@ -545,7 +548,9 @@ impl DatabaseSession {
             }
             let row = Self::parse_csv_line(trimmed);
             if !row.is_empty() && row.len() == columns.len() {
-                rows.push(row);
+                if rows.len() < 10_000 {
+                    rows.push(row);
+                }
             }
         }
 

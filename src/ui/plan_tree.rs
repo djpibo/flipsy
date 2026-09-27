@@ -69,17 +69,31 @@ impl PlanTreeView {
 
                             ui.add_space(28.0);
 
-                            // 5. SQL_ID / Plan Hash
+                            // 5. SQL_ID
                             ui.vertical(|ui| {
-                                ui.label(RichText::new("SQL_ID / Plan Hash").size(11.0).color(Color32::from_rgb(113, 113, 122)));
+                                ui.label(RichText::new("SQL_ID").size(11.0).color(Color32::from_rgb(113, 113, 122)));
                                 let s_id = sql_id.unwrap_or("-");
-                                let p_hash = plan_hash.map(|h| h.to_string()).unwrap_or_else(|| "-".to_string());
                                 ui.label(
-                                    RichText::new(format!("{} / {}", s_id, p_hash))
-                                        .size(13.0)
+                                    RichText::new(s_id)
+                                        .size(14.0)
                                         .strong()
                                         .monospace()
                                         .color(Color32::from_rgb(79, 70, 229)),
+                                );
+                            });
+
+                            ui.add_space(28.0);
+
+                            // 6. Plan Hash
+                            ui.vertical(|ui| {
+                                ui.label(RichText::new("Plan Hash").size(11.0).color(Color32::from_rgb(113, 113, 122)));
+                                let p_hash = plan_hash.map(|h| h.to_string()).unwrap_or_else(|| "-".to_string());
+                                ui.label(
+                                    RichText::new(p_hash)
+                                        .size(14.0)
+                                        .strong()
+                                        .monospace()
+                                        .color(Color32::from_rgb(24, 24, 27)),
                                 );
                             });
                         });

@@ -12,6 +12,7 @@ pub enum AppState {
         session: DatabaseSession,
         editor: EditorView,
         active_bottom_tab: BottomTab,
+        grid_view: GridView,
     },
 }
 
@@ -90,7 +91,8 @@ impl eframe::App for FlipsyApp {
             ctx.request_repaint();
             if let Ok(res) = handle.rx.try_recv() {
                 let is_explain = handle.is_explain;
-                if let AppState::Workspace { session, active_bottom_tab, .. } = &mut self.state {
+                if let AppState::Workspace { session, active_bottom_tab, grid_view, .. } = &mut self.state {
+                    grid_view.current_page = 1;
                     session.last_query_result = Some(res.query_result);
                     if let Some(nodes) = res.plan_nodes {
                         session.last_plan = Some(nodes);
@@ -127,7 +129,8 @@ impl eframe::App for FlipsyApp {
                             session,
                             editor,
                             active_bottom_tab: BottomTab::Grid,
-                            };
+                            grid_view: GridView::new(),
+                        };
                     }
                 }
             }
@@ -135,6 +138,7 @@ impl eframe::App for FlipsyApp {
                 session,
                 editor,
                 active_bottom_tab,
+                grid_view,
             } => {
                 let mut return_to_servers = false;
                 let mut run_requested = false;
@@ -426,7 +430,7 @@ impl eframe::App for FlipsyApp {
 
                         match active_bottom_tab {
                             BottomTab::Grid => {
-                                GridView::show(ui, session.last_query_result.as_ref());
+                                grid_view.show(ui, session.last_query_result.as_ref());
                             }
                             BottomTab::PlanTree => {
                                 PlanTreeView::show(ui, session.last_plan.as_ref(), session.last_sql_id.as_deref(), session.last_plan_hash);
