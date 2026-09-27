@@ -48,6 +48,8 @@ pub struct PlanNode {
     pub is_bottleneck: bool,
     pub bottleneck_tags: Vec<String>,
     pub children: Vec<PlanNode>,
+    #[serde(default)]
+    pub depth: usize,
 }
 
 impl Default for PlanNode {
@@ -76,6 +78,7 @@ impl Default for PlanNode {
             is_bottleneck: false,
             bottleneck_tags: Vec::new(),
             children: Vec::new(),
+            depth: 0,
         }
     }
 }

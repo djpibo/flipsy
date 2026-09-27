@@ -111,7 +111,7 @@ impl PlanTreeView {
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 for (idx, node) in nodes.iter().enumerate() {
-                                    Self::render_unified_row(ui, node, 0, is_runtime, idx % 2 == 0);
+                                    Self::render_unified_row(ui, node, node.depth, is_runtime, idx % 2 == 0);
                                 }
                             });
                     });
@@ -175,7 +175,7 @@ impl PlanTreeView {
             .inner_margin(egui::Margin::symmetric(6.0, 4.0))
             .show(ui, |ui| {
                 ui.vertical(|ui| {
-                    // Line 1: Operation Line (Id + Tree Symbol + Operation + Object + Alias + Cost)
+                    // Line 1: Operation Header Line (Id, Indent, Op, Object, Alias/QBlock, Cost)
                     ui.horizontal(|ui| {
                         // Id column (fixed width)
                         ui.allocate_ui_with_layout(
@@ -192,7 +192,7 @@ impl PlanTreeView {
                             },
                         );
 
-                        // Tree indentation
+                        // Tree Indentation
                         if depth > 0 {
                             ui.add_space((depth as f32) * 16.0);
                             ui.label(
@@ -210,7 +210,7 @@ impl PlanTreeView {
                                 .color(Color32::from_rgb(15, 23, 42)),
                         );
 
-                        // Object Name
+                        // Object Name (Table / Index in Blue)
                         if let Some(obj) = &node.object_name {
                             ui.label(
                                 RichText::new(format!("({})", obj))
@@ -221,26 +221,46 @@ impl PlanTreeView {
                             );
                         }
 
-                        // Object Alias
-                        if let Some(alias) = &node.object_alias {
+                        // Object Alias & Query Block Name
+                        match (&node.object_alias, &node.qblock_name) {
+                            (Some(alias), Some(qb)) => {
+                                ui.label(
+                                    RichText::new(format!("{} (@{})", alias, qb))
+                                        .size(10.5)
+                                        .strong()
+                                        .monospace()
+                                        .color(Color32::from_rgb(109, 40, 217)),
+                                );
+                            }
+                            (Some(alias), None) => {
+                                ui.label(
+                                    RichText::new(alias)
+                                        .size(10.5)
+                                        .strong()
+                                        .monospace()
+                                        .color(Color32::from_rgb(109, 40, 217)),
+                                );
+                            }
+                            (None, Some(qb)) => {
+                                ui.label(
+                                    RichText::new(format!("(@{})", qb))
+                                        .size(10.5)
+                                        .monospace()
+                                        .color(Color32::from_rgb(124, 58, 237)),
+                                );
+                            }
+                            (None, None) => {}
+                        }
+
+                        // Cost directly on Line 1 next to Operation/Object/Alias (NOT pushed to far right)
+                        if let Some(c) = node.cost {
+                            ui.add_space(6.0);
                             ui.label(
-                                RichText::new(format!("@{}", alias))
+                                RichText::new(format!("Cost: {}", format_num(c.max(0) as u64)))
                                     .size(10.5)
                                     .monospace()
                                     .color(Color32::from_rgb(100, 116, 139)),
                             );
-                        }
-
-                        // Cost on Right side
-                        if let Some(c) = node.cost {
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(
-                                    RichText::new(format!("Cost: {}", format_num(c.max(0) as u64)))
-                                        .size(10.5)
-                                        .monospace()
-                                        .color(Color32::from_rgb(148, 163, 184)),
-                                );
-                            });
                         }
                     });
 
@@ -317,35 +337,33 @@ impl PlanTreeView {
                             }
                         }
 
-                        // Access Predicate (same line)
+                        // Access Predicate (without double quotes)
                         if let Some(access) = &node.access_predicates {
+                            let clean = access.replace('"', "");
                             ui.label(RichText::new("|").size(10.5).color(Color32::from_rgb(203, 213, 225)));
                             ui.label(RichText::new("Access:").size(10.5).strong().color(Color32::from_rgb(8, 145, 178)));
-                            ui.label(RichText::new(access).size(10.5).monospace().color(Color32::from_rgb(15, 23, 42)));
+                            ui.label(RichText::new(clean).size(10.5).monospace().color(Color32::from_rgb(15, 23, 42)));
                         }
 
-                        // Filter Predicate (same line)
+                        // Filter Predicate (without double quotes)
                         if let Some(filter) = &node.filter_predicates {
+                            let clean = filter.replace('"', "");
                             ui.label(RichText::new("|").size(10.5).color(Color32::from_rgb(203, 213, 225)));
                             ui.label(RichText::new("Filter:").size(10.5).strong().color(Color32::from_rgb(180, 83, 9)));
-                            ui.label(RichText::new(filter).size(10.5).monospace().color(Color32::from_rgb(15, 23, 42)));
+                            ui.label(RichText::new(clean).size(10.5).monospace().color(Color32::from_rgb(15, 23, 42)));
                         }
 
-                        // Outline Hints (same line)
+                        // Outline Hints (without double quotes)
                         if !node.outline_hints.is_empty() {
+                            let clean_hints: Vec<String> = node.outline_hints.iter().map(|h| h.replace('"', "")).collect();
                             ui.label(RichText::new("|").size(10.5).color(Color32::from_rgb(203, 213, 225)));
                             ui.label(RichText::new("Outline:").size(10.5).strong().color(Color32::from_rgb(126, 34, 206)));
-                            let hints = node.outline_hints.join(" ");
-                            ui.label(RichText::new(hints).size(10.0).monospace().color(Color32::from_rgb(88, 28, 135)));
+                            ui.label(RichText::new(clean_hints.join(" ")).size(10.0).monospace().color(Color32::from_rgb(88, 28, 135)));
                         }
                     });
                 });
             });
 
         ui.add_space(2.0);
-
-        for (c_idx, child) in node.children.iter().enumerate() {
-            Self::render_unified_row(ui, child, depth + 1, is_runtime, c_idx % 2 == 0);
-        }
     }
 }

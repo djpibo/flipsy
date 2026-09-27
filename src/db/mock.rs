@@ -64,10 +64,12 @@ impl MockEngine {
                     is_bottleneck: false,
                     bottleneck_tags: vec![],
                     children: vec![],
+                    depth: 0,
                 },
                 PlanNode {
                     id: 1,
                     parent_id: Some(0),
+                    // depth 1
                     position: 1,
                     operation: "NESTED LOOPS".to_string(),
                     options: None,
@@ -89,6 +91,7 @@ impl MockEngine {
                     is_bottleneck: false,
                     bottleneck_tags: vec![],
                     children: vec![],
+                    depth: 0,
                 },
                 PlanNode {
                     id: 2,
@@ -114,6 +117,7 @@ impl MockEngine {
                     is_bottleneck: false,
                     bottleneck_tags: vec![],
                     children: vec![],
+                    depth: 0,
                 },
                 PlanNode {
                     id: 3,
@@ -139,6 +143,7 @@ impl MockEngine {
                     is_bottleneck: true,
                     bottleneck_tags: vec!["카디널리티 예측 왜곡 (5000x)".to_string(), "드라이빙 대량 레코드".to_string()],
                     children: vec![],
+                    depth: 0,
                 },
                 PlanNode {
                     id: 4,
@@ -164,6 +169,7 @@ impl MockEngine {
                     is_bottleneck: false,
                     bottleneck_tags: vec![],
                     children: vec![],
+                    depth: 0,
                 },
                 PlanNode {
                     id: 5,
@@ -189,6 +195,7 @@ impl MockEngine {
                     is_bottleneck: true,
                     bottleneck_tags: vec!["Starts 폭증 (150K회 루프)".to_string()],
                     children: vec![],
+                    depth: 0,
                 },
                 PlanNode {
                     id: 6,
@@ -218,6 +225,7 @@ impl MockEngine {
                         "Starts 150K 반복 탐색".to_string(),
                     ],
                     children: vec![],
+                    depth: 0,
                 },
             ];
 
@@ -263,10 +271,12 @@ impl MockEngine {
                     is_bottleneck: false,
                     bottleneck_tags: vec![],
                     children: vec![],
+                    depth: 0,
                 },
                 PlanNode {
                     id: 1,
                     parent_id: Some(0),
+                    // depth 1
                     position: 1,
                     operation: "FAST DUAL".to_string(),
                     options: None,
@@ -288,6 +298,7 @@ impl MockEngine {
                     is_bottleneck: false,
                     bottleneck_tags: vec![],
                     children: vec![],
+                    depth: 0,
                 },
             ];
 

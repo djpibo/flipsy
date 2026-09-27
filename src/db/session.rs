@@ -273,7 +273,7 @@ impl DatabaseSession {
                 if is_explain {
                     // 1번 방식: EXPLAIN PLAN FOR (옵티마이저 예측 실행계획)
                     let plan_script = format!(
-                        "EXPLAIN PLAN FOR {};\nSET PAGESIZE 50000\nSET LINESIZE 32767\nSELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('PLAN_TABLE', NULL, 'TYPICAL +COST +PREDICATE +ALIAS'));\nEXIT;\n",
+                        "SET TAB OFF\nEXPLAIN PLAN FOR {};\nSET PAGESIZE 50000\nSET LINESIZE 32767\nSELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('PLAN_TABLE', NULL, 'TYPICAL +COST +PREDICATE +ALIAS'));\nEXIT;\n",
                         clean_sql
                     );
 
@@ -325,7 +325,7 @@ impl DatabaseSession {
                 } else {
                     // 2번 방식: DBMS.XPLAN (STATISTICS_LEVEL=ALL 런타임 실행 후 DISPLAY_CURSOR 수집)
                     let query_script = format!(
-                        "SET FEEDBACK OFF\nALTER SESSION SET STATISTICS_LEVEL = ALL;\nSET MARKUP CSV ON QUOTE ON\nSET HEADING ON\nSET FEEDBACK ON SQL_ID\nSET PAGESIZE 50000\nSET LINESIZE 32767\n{};\nEXIT;\n",
+                        "SET TAB OFF\nSET FEEDBACK OFF\nALTER SESSION SET STATISTICS_LEVEL = ALL;\nSET MARKUP CSV ON QUOTE ON\nSET HEADING ON\nSET FEEDBACK ON SQL_ID\nSET PAGESIZE 50000\nSET LINESIZE 32767\n{};\nEXIT;\n",
                         clean_sql
                     );
 
@@ -338,7 +338,7 @@ impl DatabaseSession {
                             let real_sql_id = parsed_sql_id.unwrap_or(computed_id);
 
                             let xplan_script = format!(
-                                "SET PAGESIZE 50000\nSET LINESIZE 32767\nSELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY_CURSOR('{}', NULL, 'ALLSTATS LAST +COST +OUTLINE +PREDICATE'));\nEXIT;\n",
+                                "SET TAB OFF\nSET PAGESIZE 50000\nSET LINESIZE 32767\nSELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY_CURSOR('{}', NULL, 'ALLSTATS LAST +COST +OUTLINE +PREDICATE +ALIAS'));\nEXIT;\n",
                                 real_sql_id
                             );
 
@@ -503,7 +503,7 @@ impl DatabaseSession {
 
                     // Extract detailed XPLAN with ALL +OUTLINE +PREDICATE +ALIAS
                     let plan_script = format!(
-                        "EXPLAIN PLAN FOR {};\nSET PAGESIZE 50000\nSET LINESIZE 32767\nSELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('PLAN_TABLE', NULL, 'ALL +OUTLINE +PREDICATE +ALIAS'));\nEXIT;\n",
+                        "SET TAB OFF\nEXPLAIN PLAN FOR {};\nSET PAGESIZE 50000\nSET LINESIZE 32767\nSELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('PLAN_TABLE', NULL, 'ALL +OUTLINE +PREDICATE +ALIAS'));\nEXIT;\n",
                         clean_sql
                     );
                     if let Ok(plan_output) = Self::run_sqlplus_command(&conn_str, &plan_script) {
@@ -768,12 +768,18 @@ impl DatabaseSession {
 
                 // 1. Parse Plan Table Rows
                 if trimmed.starts_with('|') && !trimmed.contains("---") && !col_map.is_empty() {
+                    let raw_parts: Vec<&str> = trimmed.split('|').collect();
                     let parts: Vec<&str> = trimmed.split('|').map(|s| s.trim()).collect();
                     if let Some(&id_idx) = col_map.get("Id") {
                         if id_idx < parts.len() {
                             let id_str = parts[id_idx].trim_start_matches('*').trim();
                             if let Ok(id) = id_str.parse::<i32>() {
                                 let op_idx = col_map.get("Operation").copied().unwrap_or(2);
+                                let op_raw = if op_idx < raw_parts.len() { raw_parts[op_idx] } else { "" };
+                                let expanded_op = op_raw.replace('\t', "        ");
+                                let leading_spaces = expanded_op.chars().take_while(|c| *c == ' ').count();
+                                let depth = leading_spaces.saturating_sub(1);
+
                                 let full_op = if op_idx < parts.len() { parts[op_idx].to_string() } else { "UNKNOWN".to_string() };
                                 let (op, opt) = if full_op.contains("TABLE ACCESS") {
                                     let sub = full_op.replace("TABLE ACCESS", "").trim().to_string();
@@ -831,7 +837,7 @@ impl DatabaseSession {
 
                                 nodes.push(PlanNode {
                                     id,
-                                    parent_id: if id > 0 { Some(0) } else { None },
+                                    parent_id: None,
                                     position: id + 1,
                                     operation: op,
                                     options: opt,
@@ -853,6 +859,7 @@ impl DatabaseSession {
                                     is_bottleneck: false,
                                     bottleneck_tags: Vec::new(),
                                     children: Vec::new(),
+                                    depth,
                                 });
                             }
                         }
@@ -863,9 +870,10 @@ impl DatabaseSession {
             // 2. Parse Query Block Name / Object Alias
             if in_alias_section {
                 if let Some((id, rest)) = Self::parse_id_prefix_line(trimmed) {
-                    let parts: Vec<&str> = rest.split('/').map(|s| s.trim()).collect();
-                    let qblock = parts.get(0).map(|s| s.to_string());
-                    let alias = parts.get(1).map(|s| s.to_string());
+                    let clean_right = rest.replace('"', "").trim().to_string();
+                    let parts: Vec<&str> = clean_right.split('/').map(|s| s.trim()).collect();
+                    let qblock = parts.get(0).filter(|s| !s.is_empty()).map(|s| s.to_string());
+                    let alias = parts.get(1).filter(|s| !s.is_empty()).map(|s| s.to_string());
                     alias_map.insert(id, (alias, qblock));
                 }
             }
@@ -920,7 +928,7 @@ impl DatabaseSession {
             }
         }
 
-        // Post-process Predicates: strip ONLY the single wrapper closing parenthesis ')'
+        // Post-process Predicates: strip ONLY the single wrapper closing parenthesis ')' and double quotes
         let mut pred_map: HashMap<i32, (Option<String>, Option<String>)> = HashMap::new();
         for (id, raw_s) in raw_access_map {
             let t = raw_s.trim();
@@ -928,7 +936,7 @@ impl DatabaseSession {
                 &t[..t.len() - 1]
             } else {
                 t
-            }.trim().to_string();
+            }.trim().replace('"', "");
             pred_map.entry(id).or_insert((None, None)).0 = Some(clean);
         }
         for (id, raw_s) in raw_filter_map {
@@ -937,7 +945,7 @@ impl DatabaseSession {
                 &t[..t.len() - 1]
             } else {
                 t
-            }.trim().to_string();
+            }.trim().replace('"', "");
             pred_map.entry(id).or_insert((None, None)).1 = Some(clean);
         }
 
@@ -956,34 +964,21 @@ impl DatabaseSession {
                 node.qblock_name = qb.clone();
             }
 
-            // Outline Hints
+            // Outline Hints (clean double quotes and match specific table/alias)
             let mut matched_hints = Vec::new();
             if let Some(alias) = &node.object_alias {
                 let clean_alias = alias.replace('"', "");
                 for hint in &outline_hints {
-                    if hint.contains(&clean_alias) || hint.contains(alias) {
-                        matched_hints.push(hint.clone());
+                    let clean_hint = hint.replace('"', "");
+                    if clean_hint.contains(&clean_alias) || clean_hint.contains(alias) {
+                        matched_hints.push(clean_hint);
                     }
                 }
             } else if let Some(obj) = &node.object_name {
                 for hint in &outline_hints {
-                    if hint.contains(obj) {
-                        matched_hints.push(hint.clone());
-                    }
-                }
-            }
-            if matched_hints.is_empty() {
-                if node.operation.contains("HASH") {
-                    for hint in &outline_hints {
-                        if hint.starts_with("USE_HASH") {
-                            matched_hints.push(hint.clone());
-                        }
-                    }
-                } else if node.operation.contains("NL") || node.operation.contains("NESTED") {
-                    for hint in &outline_hints {
-                        if hint.starts_with("USE_NL") {
-                            matched_hints.push(hint.clone());
-                        }
+                    let clean_hint = hint.replace('"', "");
+                    if clean_hint.contains(obj) {
+                        matched_hints.push(clean_hint);
                     }
                 }
             }
@@ -1019,6 +1014,20 @@ impl DatabaseSession {
             if is_heavy_skew {
                 node.bottleneck_tags.push("Cardinality Skew".to_string());
             }
+        }
+
+        // Reconstruct hierarchical parent_id from depth
+        let mut depth_stack: Vec<(usize, i32)> = Vec::new();
+        for node in &mut nodes {
+            while let Some(&(d, _)) = depth_stack.last() {
+                if d >= node.depth {
+                    depth_stack.pop();
+                } else {
+                    break;
+                }
+            }
+            node.parent_id = depth_stack.last().map(|&(_, parent_id)| parent_id);
+            depth_stack.push((node.depth, node.id));
         }
 
         nodes
@@ -1816,13 +1825,13 @@ Predicate Information (identified by operation id):
 
         let node23 = nodes.iter().find(|n| n.id == 23).expect("node 23 must exist");
         let filt23 = node23.filter_predicates.as_ref().expect("node 23 must have filter");
-        assert_eq!(filt23, r#"("C"."CUST_GRADE"='GOLD' OR "C"."CUST_GRADE"='VIP' OR "C"."CUST_GRADE"='VVIP')"#);
+        assert_eq!(filt23, r#"(C.CUST_GRADE='GOLD' OR C.CUST_GRADE='VIP' OR C.CUST_GRADE='VVIP')"#);
         assert_eq!(filt23.matches('(').count(), filt23.matches(')').count(), "Parentheses must be balanced!");
 
         let node15 = nodes.iter().find(|n| n.id == 15).expect("node 15 must exist");
         let filt15 = node15.filter_predicates.as_ref().expect("node 15 must have filter");
         assert!(filt15.contains("syyyy-mm-dd hh24:mi:ss"));
-        assert!(filt15.contains(r#"("O"."ORD_STATUS"='DELIVERED' OR "O"."ORD_STATUS"='PAY_COMPLETED' OR "O"."ORD_STATUS"='SHIPPING')"#));
+        assert!(filt15.contains(r#"(O.ORD_STATUS='DELIVERED' OR O.ORD_STATUS='PAY_COMPLETED' OR O.ORD_STATUS='SHIPPING')"#));
         assert_eq!(filt15.matches('(').count(), filt15.matches(')').count(), "Parentheses must be balanced!");
     }
 
