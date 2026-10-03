@@ -533,17 +533,20 @@ pub fn generate_bind_extraction_query(sql: &str) -> Option<String> {
     ))
 }
 
+static RE_CTE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+static RE_TBL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+static RE_SPLIT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+
 /// Analyzes query skeleton, table structure, joins, and WHERE filter predicates
 pub fn analyze_query_structure(sql: &str) -> QueryStructure {
     let mut ctes = Vec::new();
-    if let Ok(re_cte) = regex::Regex::new(r"(?i)\b([a-zA-Z0-9_]+)\s+AS\s*\(") {
-        for cap in re_cte.captures_iter(sql) {
-            if let Some(m) = cap.get(1) {
-                let name = m.as_str().to_string();
-                let upper = name.to_uppercase();
-                if upper != "SELECT" && upper != "FROM" && upper != "WHERE" {
-                    ctes.push(name);
-                }
+    let re_cte = RE_CTE.get_or_init(|| regex::Regex::new(r"(?i)\b([a-zA-Z0-9_]+)\s+AS\s*\(").unwrap());
+    for cap in re_cte.captures_iter(sql) {
+        if let Some(m) = cap.get(1) {
+            let name = m.as_str().to_string();
+            let upper = name.to_uppercase();
+            if upper != "SELECT" && upper != "FROM" && upper != "WHERE" {
+                ctes.push(name);
             }
         }
     }
@@ -551,30 +554,29 @@ pub fn analyze_query_structure(sql: &str) -> QueryStructure {
     let mut tables = Vec::new();
     let keywords = ["WHERE", "GROUP", "ORDER", "HAVING", "JOIN", "LEFT", "RIGHT", "INNER", "ON", "AS", "SELECT", "FROM", "SET"];
     let pat = r"(?i)(FROM|JOIN|LEFT\s+JOIN|RIGHT\s+JOIN|INNER\s+JOIN|FULL\s+OUTER\s+JOIN)\s+([a-zA-Z0-9_.]+)(?:\s+(?:AS\s+)?([a-zA-Z0-9_]+))?(?:\s+ON\s+([^,\n;]+?)(?=\s+(?:JOIN|LEFT|RIGHT|INNER|WHERE|GROUP|ORDER|HAVING|;|$)))?";
-    if let Ok(re_tbl) = regex::Regex::new(pat) {
-        for cap in re_tbl.captures_iter(sql) {
-            let jtype = cap.get(1).map(|m| m.as_str().to_uppercase().split_whitespace().collect::<Vec<&str>>().join(" ")).unwrap_or_else(|| "FROM".to_string());
-            let tbl = cap.get(2).map(|m| m.as_str().to_string()).unwrap_or_default();
-            if tbl.is_empty() || keywords.contains(&tbl.to_uppercase().as_str()) {
-                continue;
-            }
-            let alias = cap.get(3).and_then(|m| {
-                let a = m.as_str().to_string();
-                if keywords.contains(&a.to_uppercase().as_str()) {
-                    None
-                } else {
-                    Some(a)
-                }
-            });
-            let cond = cap.get(4).map(|m| m.as_str().trim().to_string()).filter(|s| !s.is_empty());
-
-            tables.push(TableRef {
-                name: tbl,
-                alias,
-                join_type: jtype,
-                join_condition: cond,
-            });
+    let re_tbl = RE_TBL.get_or_init(|| regex::Regex::new(pat).unwrap());
+    for cap in re_tbl.captures_iter(sql) {
+        let jtype = cap.get(1).map(|m| m.as_str().to_uppercase().split_whitespace().collect::<Vec<&str>>().join(" ")).unwrap_or_else(|| "FROM".to_string());
+        let tbl = cap.get(2).map(|m| m.as_str().to_string()).unwrap_or_default();
+        if tbl.is_empty() || keywords.contains(&tbl.to_uppercase().as_str()) {
+            continue;
         }
+        let alias = cap.get(3).and_then(|m| {
+            let a = m.as_str().to_string();
+            if keywords.contains(&a.to_uppercase().as_str()) {
+                None
+            } else {
+                Some(a)
+            }
+        });
+        let cond = cap.get(4).map(|m| m.as_str().trim().to_string()).filter(|s| !s.is_empty());
+
+        tables.push(TableRef {
+            name: tbl,
+            alias,
+            join_type: jtype,
+            join_condition: cond,
+        });
     }
 
     let mut filters = Vec::new();
@@ -593,12 +595,11 @@ pub fn analyze_query_structure(sql: &str) -> QueryStructure {
         }
 
         let raw_where = &after_where[..end_pos];
-        if let Ok(re_split) = regex::Regex::new(r"(?i)(?:AND|OR)") {
-            for part in re_split.split(raw_where) {
-                let c = part.trim();
-                if !c.is_empty() {
-                    filters.push(c.to_string());
-                }
+        let re_split = RE_SPLIT.get_or_init(|| regex::Regex::new(r"(?i)\s+(?:AND|OR)\s+").unwrap());
+        for part in re_split.split(raw_where) {
+            let c = part.trim();
+            if !c.is_empty() {
+                filters.push(c.to_string());
             }
         }
     }

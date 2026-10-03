@@ -1,10 +1,13 @@
 use eframe::egui::{self, Color32, RichText, Rounding, Stroke, Vec2};
 use crate::models::QueryResult;
 
+use std::time::Instant;
+
 #[derive(Debug, Clone)]
 pub struct GridView {
     pub current_page: usize,
     pub page_size: usize,
+    pub copy_status: Option<(String, Instant)>,
 }
 
 impl Default for GridView {
@@ -12,6 +15,7 @@ impl Default for GridView {
         Self {
             current_page: 1,
             page_size: 100,
+            copy_status: None,
         }
     }
 }
@@ -110,11 +114,52 @@ impl GridView {
                                 );
                             }
 
-                            // Pagination Controls (Right-Aligned) - Always visible when rows exist
+                            // Copy feedback notice
+                            if let Some((msg, time)) = &self.copy_status {
+                                if time.elapsed().as_secs_f32() < 2.5 {
+                                    ui.add_space(12.0);
+                                    ui.label(
+                                        RichText::new(msg)
+                                            .color(Color32::from_rgb(16, 185, 129))
+                                            .strong()
+                                            .size(11.5),
+                                    );
+                                }
+                            }
+
+                            // Pagination & Copy Controls (Right-Aligned) - Always visible when rows exist
                             if total_rows > 0 {
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     let is_last = self.current_page >= total_pages;
                                     let is_first = self.current_page <= 1;
+
+                                    // Excel TSV Copy Button
+                                    let copy_btn = egui::Button::new(
+                                        RichText::new("📋 엑셀 복사 (TSV)")
+                                            .size(11.0)
+                                            .strong()
+                                            .color(Color32::from_rgb(24, 24, 27)),
+                                    )
+                                    .fill(Color32::from_rgb(244, 244, 245))
+                                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(212, 212, 216)))
+                                    .rounding(Rounding::same(4.0));
+
+                                    if ui.add(copy_btn).on_hover_text("현재 페이지의 데이터를 엑셀에 바로 붙여넣을 수 있는 탭 구분(TSV) 형식으로 클립보드에 복사합니다.").clicked() {
+                                        let mut tsv = String::with_capacity(4096);
+                                        tsv.push_str(&res.columns.join("\t"));
+                                        tsv.push('\n');
+                                        for row in &res.rows[start_idx..end_idx] {
+                                            tsv.push_str(&row.join("\t"));
+                                            tsv.push('\n');
+                                        }
+                                        ui.output_mut(|o| o.copied_text = tsv);
+                                        self.copy_status = Some((
+                                            format!("✓ {}건 엑셀(TSV) 복사 완료!", end_idx - start_idx),
+                                            Instant::now(),
+                                        ));
+                                    }
+
+                                    ui.add_space(8.0);
 
                                     if ui.add_enabled(!is_last, egui::Button::new(RichText::new("Last >|").size(11.0))).clicked() {
                                         self.current_page = total_pages;

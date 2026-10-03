@@ -160,14 +160,34 @@ impl DatabaseSession {
         self.last_plan_hash = None;
     }
 
+    fn build_sqlplus_command(conn_str: &str) -> Command {
+        // 1. If user prefers local sqlplus CLI directly (e.g. Instant Client)
+        if std::env::var("FLIPSY_USE_LOCAL_SQLPLUS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            let mut cmd = Command::new("sqlplus");
+            cmd.args(["-L", "-s", conn_str]);
+            return cmd;
+        }
+
+        // 2. Default: Docker exec into container (container name configurable via env)
+        let container = std::env::var("FLIPSY_DOCKER_CONTAINER")
+            .or_else(|_| std::env::var("FLIPSY_ORACLE_CONTAINER"))
+            .unwrap_or_else(|_| "oracle23ai".to_string());
+
+        let mut cmd = Command::new("docker");
+        cmd.args(["exec", "-i", &container, "sqlplus", "-L", "-s", conn_str]);
+        cmd
+    }
+
     fn run_sqlplus_command(conn_str: &str, script: &str) -> Result<String, String> {
-        let mut child = Command::new("docker")
-            .args(["exec", "-i", "oracle23ai", "sqlplus", "-L", "-s", conn_str])
+        let mut child = Self::build_sqlplus_command(conn_str)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| format!("Docker 실행 실패: {}", e))?;
+            .map_err(|e| format!("Oracle 프로세스 실행 실패: {}", e))?;
 
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(script.as_bytes());
@@ -200,13 +220,12 @@ impl DatabaseSession {
     }
 
     pub fn run_sqlplus_streaming(conn_str: &str, script: &str, tracker: &QueryProgressTracker) -> Result<String, String> {
-        let mut child = Command::new("docker")
-            .args(["exec", "-i", "oracle23ai", "sqlplus", "-L", "-s", conn_str])
+        let mut child = Self::build_sqlplus_command(conn_str)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| format!("Docker 실행 실패: {}", e))?;
+            .map_err(|e| format!("Oracle 프로세스 실행 실패: {}", e))?;
 
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(script.as_bytes());
@@ -324,44 +343,64 @@ impl DatabaseSession {
                         }
                     }
                 } else {
-                    // 2번 방식: DBMS.XPLAN (STATISTICS_LEVEL=ALL 런타임 실행 후 DISPLAY_CURSOR 수집)
-                    let query_script = format!(
-                        "SET TAB OFF\nSET FEEDBACK OFF\nALTER SESSION SET STATISTICS_LEVEL = ALL;\nSET MARKUP CSV ON QUOTE ON\nSET HEADING ON\nSET FEEDBACK ON SQL_ID\nSET PAGESIZE 50000\nSET LINESIZE 32767\n{};\nEXIT;\n",
+                    // 2번 방식: DBMS.XPLAN (동일 세션 단일 파이프라인으로 쿼리 실행 및 DISPLAY_CURSOR 일괄 수집)
+                    let combined_script = format!(
+                        "SET TAB OFF\nSET FEEDBACK OFF\nALTER SESSION SET STATISTICS_LEVEL = ALL;\nSET MARKUP CSV ON QUOTE ON\nSET HEADING ON\nSET FEEDBACK ON SQL_ID\nSET PAGESIZE 50000\nSET LINESIZE 32767\n{};\nSET MARKUP CSV OFF\nSET FEEDBACK OFF\nPROMPT ===FLIPSY_XPLAN_START===\nSELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY_CURSOR(NULL, NULL, 'ALLSTATS LAST +COST +OUTLINE +PREDICATE +ALIAS'));\nPROMPT ===FLIPSY_XPLAN_END===\nEXIT;\n",
                         clean_sql
                     );
 
-                    match DatabaseSession::run_sqlplus_streaming(&conn_str, &query_script, &tracker_clone) {
-                        Ok(csv_output) => {
+                    match DatabaseSession::run_sqlplus_streaming(&conn_str, &combined_script, &tracker_clone) {
+                        Ok(full_output) => {
                             let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-                            let (cols, rows, parsed_sql_id) = DatabaseSession::parse_csv_output_with_sql_id(&csv_output);
+
+                            // Split CSV output and XPLAN section
+                            let (csv_part, xplan_part) = if let Some(idx) = full_output.find("===FLIPSY_XPLAN_START===") {
+                                let csv = &full_output[..idx];
+                                let rest = &full_output[idx + "===FLIPSY_XPLAN_START===".len()..];
+                                let xplan = if let Some(end_idx) = rest.find("===FLIPSY_XPLAN_END===") {
+                                    &rest[..end_idx]
+                                } else {
+                                    rest
+                                };
+                                (csv, Some(xplan))
+                            } else {
+                                (full_output.as_str(), None)
+                            };
+
+                            let (cols, rows, parsed_sql_id) = DatabaseSession::parse_csv_output_with_sql_id(csv_part);
 
                             let (computed_id, computed_hash) = compute_oracle_sql_id(clean_sql);
                             let real_sql_id = parsed_sql_id.unwrap_or(computed_id);
 
-                            let xplan_script = format!(
-                                "SET TAB OFF\nSET PAGESIZE 50000\nSET LINESIZE 32767\nSELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY_CURSOR('{}', NULL, 'ALLSTATS LAST +COST +OUTLINE +PREDICATE +ALIAS'));\nEXIT;\n",
-                                real_sql_id
-                            );
+                            let mut plan_nodes = None;
+                            let mut plan_hash = None;
 
-                            let (plan_nodes, plan_hash) = if let Ok(xplan_out) = DatabaseSession::run_sqlplus_command(&conn_str, &xplan_script) {
-                                let (p, h, _) = DatabaseSession::parse_xplan_with_meta(&xplan_out);
+                            if let Some(xplan_text) = xplan_part {
+                                let (p, h, _) = DatabaseSession::parse_xplan_with_meta(xplan_text);
                                 if !p.is_empty() {
-                                    (Some(p), h.or(Some(computed_hash as u64)))
-                                } else {
-                                    let fallback_script = format!(
-                                        "EXPLAIN PLAN FOR {};\nSET PAGESIZE 50000\nSET LINESIZE 32767\nSELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('PLAN_TABLE', NULL, 'ALL +OUTLINE +PREDICATE +ALIAS'));\nEXIT;\n",
-                                        clean_sql
-                                    );
-                                    if let Ok(fb_out) = DatabaseSession::run_sqlplus_command(&conn_str, &fallback_script) {
-                                        let (p_fb, h_fb, _) = DatabaseSession::parse_xplan_with_meta(&fb_out);
-                                        (Some(p_fb), h_fb.or(Some(computed_hash as u64)))
-                                    } else {
-                                        (None, Some(computed_hash as u64))
+                                    plan_nodes = Some(p);
+                                    plan_hash = h.or(Some(computed_hash as u64));
+                                }
+                            }
+
+                            // Fallback to EXPLAIN PLAN only if DISPLAY_CURSOR had no entries
+                            if plan_nodes.is_none() {
+                                let fallback_script = format!(
+                                    "EXPLAIN PLAN FOR {};\nSET PAGESIZE 50000\nSET LINESIZE 32767\nSELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('PLAN_TABLE', NULL, 'ALL +OUTLINE +PREDICATE +ALIAS'));\nEXIT;\n",
+                                    clean_sql
+                                );
+                                if let Ok(fb_out) = DatabaseSession::run_sqlplus_command(&conn_str, &fallback_script) {
+                                    let (p_fb, h_fb, _) = DatabaseSession::parse_xplan_with_meta(&fb_out);
+                                    if !p_fb.is_empty() {
+                                        plan_nodes = Some(p_fb);
+                                        plan_hash = h_fb.or(Some(computed_hash as u64));
                                     }
                                 }
-                            } else {
-                                (None, Some(computed_hash as u64))
-                            };
+                            }
+
+                            if plan_hash.is_none() {
+                                plan_hash = Some(computed_hash as u64);
+                            }
 
                             let row_count = rows.len();
                             let total_bytes = tracker_clone.bytes_read.load(Ordering::Relaxed);
@@ -491,40 +530,58 @@ impl DatabaseSession {
             );
 
             let clean_sql = sql.trim().trim_end_matches(';');
-            let query_script = format!(
-                "SET FEEDBACK OFF\nSET MARKUP CSV ON QUOTE ON\nSET HEADING ON\nSET FEEDBACK ON SQL_ID\nSET PAGESIZE 50000\nSET LINESIZE 32767\n{};\nEXIT;\n",
+            let combined_script = format!(
+                "SET TAB OFF\nSET FEEDBACK OFF\nALTER SESSION SET STATISTICS_LEVEL = ALL;\nSET MARKUP CSV ON QUOTE ON\nSET HEADING ON\nSET FEEDBACK ON SQL_ID\nSET PAGESIZE 50000\nSET LINESIZE 32767\n{};\nSET MARKUP CSV OFF\nSET FEEDBACK OFF\nPROMPT ===FLIPSY_XPLAN_START===\nSELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY_CURSOR(NULL, NULL, 'ALLSTATS LAST +COST +OUTLINE +PREDICATE +ALIAS'));\nPROMPT ===FLIPSY_XPLAN_END===\nEXIT;\n",
                 clean_sql
             );
 
-            match Self::run_sqlplus_command(&conn_str, &query_script) {
-                Ok(csv_output) => {
+            match Self::run_sqlplus_command(&conn_str, &combined_script) {
+                Ok(full_output) => {
                     let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-                    let (cols, rows, parsed_sql_id) = Self::parse_csv_output_with_sql_id(&csv_output);
+                    let (csv_part, xplan_part) = if let Some(idx) = full_output.find("===FLIPSY_XPLAN_START===") {
+                        let csv = &full_output[..idx];
+                        let rest = &full_output[idx + "===FLIPSY_XPLAN_START===".len()..];
+                        let xplan = if let Some(end_idx) = rest.find("===FLIPSY_XPLAN_END===") {
+                            &rest[..end_idx]
+                        } else {
+                            rest
+                        };
+                        (csv, Some(xplan))
+                    } else {
+                        (full_output.as_str(), None)
+                    };
+
+                    let (cols, rows, parsed_sql_id) = Self::parse_csv_output_with_sql_id(csv_part);
                     let real_sql_id = parsed_sql_id.unwrap_or(computed_id);
 
-                    // Extract detailed XPLAN with ALL +OUTLINE +PREDICATE +ALIAS
-                    let plan_script = format!(
-                        "SET TAB OFF\nEXPLAIN PLAN FOR {};\nSET PAGESIZE 50000\nSET LINESIZE 32767\nSELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('PLAN_TABLE', NULL, 'ALL +OUTLINE +PREDICATE +ALIAS'));\nEXIT;\n",
-                        clean_sql
-                    );
-                    if let Ok(plan_output) = Self::run_sqlplus_command(&conn_str, &plan_script) {
-                        let (parsed_plan, hash, _) = Self::parse_xplan_with_meta(&plan_output);
-                        if !parsed_plan.is_empty() {
-                            self.last_plan = Some(parsed_plan);
-                            self.last_plan_hash = hash.or(Some(computed_hash as u64));
-                            self.last_sql_id = Some(real_sql_id.clone());
-                        } else {
-                            let (_, mock_plan) = MockEngine::execute(sql);
-                            self.last_plan = Some(mock_plan);
-                            self.last_plan_hash = Some(computed_hash as u64);
-                            self.last_sql_id = Some(real_sql_id.clone());
+                    let mut plan_nodes = None;
+                    let mut plan_hash = None;
+
+                    if let Some(xplan_text) = xplan_part {
+                        let (p, h, _) = Self::parse_xplan_with_meta(xplan_text);
+                        if !p.is_empty() {
+                            plan_nodes = Some(p);
+                            plan_hash = h.or(Some(computed_hash as u64));
                         }
-                    } else {
-                        let (_, mock_plan) = MockEngine::execute(sql);
-                        self.last_plan = Some(mock_plan);
-                        self.last_plan_hash = Some(computed_hash as u64);
-                        self.last_sql_id = Some(real_sql_id.clone());
                     }
+
+                    if plan_nodes.is_none() {
+                        let fallback_script = format!(
+                            "EXPLAIN PLAN FOR {};\nSET PAGESIZE 50000\nSET LINESIZE 32767\nSELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('PLAN_TABLE', NULL, 'ALL +OUTLINE +PREDICATE +ALIAS'));\nEXIT;\n",
+                            clean_sql
+                        );
+                        if let Ok(fb_out) = Self::run_sqlplus_command(&conn_str, &fallback_script) {
+                            let (p_fb, h_fb, _) = Self::parse_xplan_with_meta(&fb_out);
+                            if !p_fb.is_empty() {
+                                plan_nodes = Some(p_fb);
+                                plan_hash = h_fb.or(Some(computed_hash as u64));
+                            }
+                        }
+                    }
+
+                    self.last_plan = plan_nodes;
+                    self.last_plan_hash = plan_hash.or(Some(computed_hash as u64));
+                    self.last_sql_id = Some(real_sql_id.clone());
 
                     let row_count = rows.len();
                     let res = QueryResult {

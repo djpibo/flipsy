@@ -18,8 +18,63 @@ pub struct TnsManager {
 }
 
 impl TnsManager {
+    pub fn discover_tns_path() -> PathBuf {
+        // 1. TNS_ADMIN environment variable
+        if let Ok(admin) = std::env::var("TNS_ADMIN") {
+            let path = PathBuf::from(&admin);
+            if path.is_file() {
+                return path;
+            }
+            let candidate = path.join("tnsnames.ora");
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+
+        // 2. Co-located with executable (portable mode)
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                let candidate = exe_dir.join("tnsnames.ora");
+                if candidate.exists() {
+                    return candidate;
+                }
+            }
+        }
+
+        // 3. Current Working Directory
+        let cwd_candidate = PathBuf::from("tnsnames.ora");
+        if cwd_candidate.exists() {
+            if let Ok(abs) = std::fs::canonicalize(&cwd_candidate) {
+                return abs;
+            }
+            return cwd_candidate;
+        }
+
+        // 4. ORACLE_HOME environment variable
+        if let Ok(home) = std::env::var("ORACLE_HOME") {
+            let candidate = PathBuf::from(home).join("network").join("admin").join("tnsnames.ora");
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+
+        // 5. Fallback check for default development path
+        let dev_fallback = PathBuf::from(r"C:\project\flipsy\tnsnames.ora");
+        if dev_fallback.exists() {
+            return dev_fallback;
+        }
+
+        // 6. Default to executable directory or current working directory for new creation
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                return exe_dir.join("tnsnames.ora");
+            }
+        }
+        PathBuf::from("tnsnames.ora")
+    }
+
     pub fn new() -> Self {
-        let file_path = PathBuf::from(r"C:\project\flipsy\tnsnames.ora");
+        let file_path = Self::discover_tns_path();
         let mut manager = Self {
             file_path,
             entries: Vec::new(),

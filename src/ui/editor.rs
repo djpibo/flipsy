@@ -18,11 +18,21 @@ pub struct EditorAction {
     pub execute_custom_sql: Option<String>,
 }
 
+use crate::models::QueryStructure;
+
 pub struct EditorView {
     pub sql: String,
     pub active_sidebar: SidebarMode,
     pub copied_feedback: bool,
     pub bind_values: HashMap<String, String>,
+
+    // Performance Caching Fields (Avoid re-analyzing on every 60fps frame)
+    cached_sql: String,
+    cached_structure: QueryStructure,
+    cached_binds: Vec<String>,
+    cached_candidate: Option<String>,
+    cached_line_count: usize,
+    cached_gutter_text: String,
 }
 
 impl EditorView {
@@ -39,11 +49,48 @@ impl EditorView {
  WHERE I.CENTER_CD = 'HUB_01'
    AND M.MOVE_STATUS = 'READY';"#;
 
+        let structure = analyze_query_structure(initial_sql);
+        let binds = extract_bind_variables(initial_sql);
+        let candidate = generate_bind_extraction_query(initial_sql);
+        let line_count = initial_sql.split('\n').count().max(1);
+
+        let mut gutter = String::with_capacity(line_count * 6);
+        for i in 1..=line_count {
+            use std::fmt::Write;
+            let _ = writeln!(gutter, " {:>2} ", i);
+        }
+
         Self {
             sql: initial_sql.to_string(),
             active_sidebar: SidebarMode::None,
             copied_feedback: false,
             bind_values: HashMap::new(),
+            cached_sql: initial_sql.to_string(),
+            cached_structure: structure,
+            cached_binds: binds,
+            cached_candidate: candidate,
+            cached_line_count: line_count,
+            cached_gutter_text: gutter,
+        }
+    }
+
+    pub fn ensure_cache(&mut self) {
+        let line_count = self.sql.split('\n').count().max(1);
+        if line_count != self.cached_line_count || self.cached_gutter_text.is_empty() {
+            self.cached_line_count = line_count;
+            let mut gutter = String::with_capacity(line_count * 6);
+            for i in 1..=line_count {
+                use std::fmt::Write;
+                let _ = writeln!(gutter, " {:>2} ", i);
+            }
+            self.cached_gutter_text = gutter;
+        }
+
+        if self.sql != self.cached_sql {
+            self.cached_sql = self.sql.clone();
+            self.cached_structure = analyze_query_structure(&self.sql);
+            self.cached_binds = extract_bind_variables(&self.sql);
+            self.cached_candidate = generate_bind_extraction_query(&self.sql);
         }
     }
 
@@ -70,6 +117,8 @@ impl EditorView {
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) -> EditorAction {
+        self.ensure_cache();
+
         let mut action = EditorAction {
             run_requested: false,
             explain_requested: false,
@@ -140,17 +189,12 @@ impl EditorView {
                                         .auto_shrink([false, false])
                                         .show(ui, |ui| {
                                             ui.horizontal_top(|ui| {
-                                                // Line numbers gutter
-                                                let line_count = self.sql.split('\n').count().max(1);
-                                                let mut num_str = String::new();
-                                                for i in 1..=line_count {
-                                                    num_str.push_str(&format!(" {:>2} \n", i));
-                                                }
-
+                                                // Cached line numbers gutter
+                                                let line_count = self.cached_line_count;
                                                 ui.vertical(|ui| {
                                                     ui.add_space(1.0);
                                                     ui.label(
-                                                        RichText::new(num_str)
+                                                        RichText::new(&self.cached_gutter_text)
                                                             .font(FontId::monospace(12.5))
                                                             .color(Color32::from_rgb(161, 161, 170)),
                                                     );
@@ -198,12 +242,14 @@ impl EditorView {
                                                 match self.active_sidebar {
                                                     SidebarMode::None => {}
                                                     SidebarMode::Figure => {
-                                                        Self::render_figure_sidebar(ui, &self.sql, &mut self.active_sidebar);
+                                                        Self::render_figure_sidebar(ui, &self.cached_structure, &mut self.active_sidebar);
                                                     }
                                                     SidebarMode::Bind => {
                                                         Self::render_bind_sidebar(
                                                             ui,
                                                             &self.sql,
+                                                            &self.cached_binds,
+                                                            self.cached_candidate.as_deref(),
                                                             &mut self.bind_values,
                                                             &mut self.active_sidebar,
                                                             &mut self.copied_feedback,
@@ -222,8 +268,7 @@ impl EditorView {
         action
     }
 
-    fn render_figure_sidebar(ui: &mut egui::Ui, sql: &str, active_sidebar: &mut SidebarMode) {
-        let structure = analyze_query_structure(sql);
+    fn render_figure_sidebar(ui: &mut egui::Ui, structure: &QueryStructure, active_sidebar: &mut SidebarMode) {
 
         // Sidebar Header
         ui.horizontal(|ui| {
@@ -339,13 +384,13 @@ impl EditorView {
     fn render_bind_sidebar(
         ui: &mut egui::Ui,
         sql: &str,
+        binds: &[String],
+        candidate: Option<&str>,
         bind_values: &mut HashMap<String, String>,
         active_sidebar: &mut SidebarMode,
         copied_feedback: &mut bool,
         execute_custom_sql: &mut Option<String>,
     ) {
-        let binds = extract_bind_variables(sql);
-        let candidate = generate_bind_extraction_query(sql);
 
         // Sidebar Header
         ui.horizontal(|ui| {
@@ -383,7 +428,7 @@ impl EditorView {
             ui.add_space(4.0);
 
             // Bind variable input form
-            for b in &binds {
+            for b in binds {
                 let val = bind_values.entry(b.clone()).or_insert_with(|| default_bind_value(b));
                 ui.horizontal(|ui| {
                     egui::Frame::none()
@@ -448,7 +493,7 @@ impl EditorView {
                     .inner_margin(egui::Margin::same(6.0))
                     .show(ui, |ui| {
                         ui.label(
-                            RichText::new(&bind_query)
+                            RichText::new(bind_query)
                                 .size(10.5)
                                 .monospace()
                                 .color(Color32::from_rgb(30, 41, 59)),
@@ -468,7 +513,7 @@ impl EditorView {
                     .rounding(Rounding::same(4.0));
 
                     if ui.add(copy_btn).clicked() {
-                        ui.output_mut(|o| o.copied_text = bind_query.clone());
+                        ui.output_mut(|o| o.copied_text = bind_query.to_string());
                         *copied_feedback = true;
                     }
 
@@ -482,7 +527,7 @@ impl EditorView {
                     .rounding(Rounding::same(4.0));
 
                     if ui.add(exec_btn).clicked() {
-                        *execute_custom_sql = Some(bind_query.clone());
+                        *execute_custom_sql = Some(bind_query.to_string());
                     }
                 });
             }

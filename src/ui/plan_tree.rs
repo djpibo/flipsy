@@ -5,17 +5,19 @@ pub struct PlanTreeView;
 
 fn format_num(n: u64) -> String {
     let s = n.to_string();
-    let mut out = String::new();
-    let chars: Vec<char> = s.chars().collect();
-    let len = chars.len();
-    for (i, &c) in chars.iter().enumerate() {
-        out.push(c);
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let num_commas = (len.saturating_sub(1)) / 3;
+    let mut out = Vec::with_capacity(len + num_commas);
+    for (i, &b) in bytes.iter().enumerate() {
+        out.push(b);
         let rem = len - 1 - i;
-        if rem > 0 && rem.is_multiple_of(3) {
-            out.push(',');
+        if rem > 0 && rem % 3 == 0 {
+            out.push(b',');
         }
     }
-    out
+    // Safe because ASCII digits and comma are valid UTF-8
+    unsafe { String::from_utf8_unchecked(out) }
 }
 
 impl PlanTreeView {
